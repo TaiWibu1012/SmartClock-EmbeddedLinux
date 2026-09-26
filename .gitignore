@@ -18,3 +18,7 @@ src/app/smartclock_debug
 *.tmp
 *~
 .DS_Store
+
+# AI Agent rules & configurations (Local IDE only)
+.agent
+.agents
