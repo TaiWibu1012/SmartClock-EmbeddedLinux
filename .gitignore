@@ -1,0 +1,20 @@
+# Object files & Binaries
+*.o
+*.ko
+*.mod*
+*.order
+*.symvers
+*.cmd
+.tmp_versions/
+
+# Application executables & Debug logs
+src/app/smartclock
+src/app/smartclock_debug
+*.log
+!docs/debug_logs/*.log
+*.logog
+
+# Temporary files
+*.tmp
+*~
+.DS_Store

@@ -1,0 +1,73 @@
+$ gdb ./smartclock
+GNU gdb (GDB) 12.1
+Copyright (C) 2022 Free Software Foundation, Inc.
+Reading symbols from ./smartclock...
+(gdb) set pagination off
+(gdb) b main
+Breakpoint 1 at 0x10b1a0: file main.c, line 258.
+(gdb) b dispatch_button_action
+Breakpoint 2 at 0x10ae90: file main.c, line 133.
+(gdb) b alarm_manager_check
+Breakpoint 3 at 0x10b6d0: file alarm_manager.c, line 105.
+(gdb) run
+Starting program: /home/tai/devlinux/smartclock 
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+
+Breakpoint 1, main (argc=1, argv=0x7ffffff858) at main.c:258
+258	    printf("====================================================\n");
+(gdb) c
+Continuing.
+====================================================
+   SMART WEATHER ALARM CLOCK (Project 2 Engine)     
+====================================================
+[New Thread 0x7ff7da5160 (LWP 28101)]
+[New Thread 0x7ff75a4160 (LWP 28102)]
+[New Thread 0x7ff6da3160 (LWP 28103)]
+[New Thread 0x7ff65a2160 (LWP 28104)]
+[New Thread 0x7ff5da1160 (LWP 28105)]
+[New Thread 0x7ff55a0160 (LWP 28106)]
+
+(gdb) info threads
+  Id   Target Id                                      Frame 
+* 1    Thread 0x7ff7da6000 (LWP 28100) "smartclock"   0x0000007ff7eb8e4c in pthread_join (threadid=549615554912, thread_return=0x0) at pthread_join.c:89
+  2    Thread 0x7ff7da5160 (LWP 28101) "smartclock"   0x0000007ff7eb2e14 in __GI___poll (fds=0x7ff7da4a40, nfds=1, timeout=500) at ../sysdeps/unix/sysv/linux/poll.c:41
+  3    Thread 0x7ff75a4160 (LWP 28102) "smartclock"   0x0000007ff7eb3a28 in read () at ../sysdeps/unix/sysv/linux/read.c:26
+  4    Thread 0x7ff6da3160 (LWP 28103) "smartclock"   0x0000007ff7e8648c in futex_wait_cancelable (futex_word=futex_word@entry=0x120120 <g_state_cond>, expected=expected@entry=0) at futex-internal.c:183
+  5    Thread 0x7ff65a2160 (LWP 28104) "smartclock"   0x0000007ff7eb2e14 in __GI___poll (fds=0x7ff65a19e0, nfds=1, timeout=500) at ../sysdeps/unix/sysv/linux/poll.c:41
+  6    Thread 0x7ff5da1160 (LWP 28105) "smartclock"   0x0000007ff7e8648c in futex_wait_cancelable (futex_word=futex_word@entry=0x120120 <g_state_cond>, expected=expected@entry=0) at futex-internal.c:183
+  7    Thread 0x7ff55a0160 (LWP 28106) "smartclock"   0x0000007ff7e8648c in futex_wait_cancelable (futex_word=futex_word@entry=0x120350 <s_net_cond>, expected=expected@entry=0) at futex-internal.c:183
+
+(gdb) thread apply all bt 2
+
+Thread 7 (Thread 0x7ff55a0160 (LWP 28106)):
+#0  0x0000007ff7e8648c in futex_wait_cancelable (futex_word=futex_word@entry=0x120350 <s_net_cond>, expected=expected@entry=0) at futex-internal.c:183
+#1  0x000000000010c284 in smartconfig_thread_func (arg=0x0) at smartconfig.c:461
+
+Thread 6 (Thread 0x7ff5da1160 (LWP 28105)):
+#0  0x0000007ff7e8648c in futex_wait_cancelable (futex_word=futex_word@entry=0x120120 <g_state_cond>, expected=expected@entry=0) at futex-internal.c:183
+#1  0x000000000010be58 in buzzer_thread_func (arg=0x0) at alarm_manager.c:145
+
+Thread 5 (Thread 0x7ff65a2160 (LWP 28104)):
+#0  0x0000007ff7eb2e14 in __GI___poll (fds=0x7ff65a19e0, nfds=1, timeout=500) at ../sysdeps/unix/sysv/linux/poll.c:41
+#1  0x000000000010c9a0 in webserver_thread_func (arg=0x0) at webserver.c:328
+
+Thread 4 (Thread 0x7ff6da3160 (LWP 28103)):
+#0  0x0000007ff7e8648c in futex_wait_cancelable (futex_word=futex_word@entry=0x120120 <g_state_cond>, expected=expected@entry=0) at futex-internal.c:183
+#1  0x000000000010b910 in weather_thread_func (arg=0x0) at weather_screen.c:292
+
+Thread 3 (Thread 0x7ff75a4160 (LWP 28102)):
+#0  0x0000007ff7eb3a28 in read () at ../sysdeps/unix/sysv/linux/read.c:26
+#1  0x000000000010b540 in clock_thread_func (arg=0x0) at clock_screen.c:122
+
+Thread 2 (Thread 0x7ff7da5160 (LWP 28101)):
+#0  0x0000007ff7eb2e14 in __GI___poll (fds=0x7ff7da4a40, nfds=1, timeout=500) at ../sysdeps/unix/sysv/linux/poll.c:41
+#1  0x000000000010b028 in btn_thread_func (arg=0x0) at main.c:227
+
+Thread 1 (Thread 0x7ff7da6000 (LWP 28100)):
+#0  0x0000007ff7eb8e4c in pthread_join (threadid=549615554912, thread_return=0x0) at pthread_join.c:89
+#1  0x000000000010b3a8 in main (argc=1, argv=0x7ffffff858) at main.c:321
+(gdb) quit
+A debugging session is active.
+	Inferior 1 [process 28100] will be killed.
+Quit anyway? (y or n) y
