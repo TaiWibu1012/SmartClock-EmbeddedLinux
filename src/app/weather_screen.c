@@ -22,8 +22,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <netdb.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #define HTTP_BUF_SIZE 2048
+
+#define OPENMETEO_HOST  "api.open-meteo.com"
+#define OPENMETEO_PORT  443
+#define OPENMETEO_PATH  "/v1/forecast?latitude=10.8231&longitude=106.6297&current=temperature_2m,relative_humidity_2m,weather_code"
 
 /**
  * @brief Retrieve local IP address assigned to a specific network interface
@@ -58,16 +65,75 @@ static bool get_interface_ip(const char *ifname, char *out_ip, size_t max_len)
     return true;
 }
 
+static const char *wmo_code_to_condition(int code)
+{
+    switch (code) {
+        case 0:
+            return "Clear Sky";
+        case 1:
+        case 2:
+            return "Partly Cloudy";
+        case 3:
+            return "Overcast";
+        case 45:
+        case 48:
+            return "Foggy";
+        case 51:
+        case 53:
+        case 55:
+            return "Drizzle";
+        case 61:
+        case 63:
+        case 65:
+            return "Rainy";
+        case 80:
+        case 81:
+        case 82:
+            return "Rain Showers";
+        case 71:
+        case 73:
+        case 75:
+            return "Snowy";
+        case 95:
+        case 96:
+        case 99:
+            return "Thunderstorm";
+        default:
+            return "Fair";
+    }
+}
+
 /**
- * @brief Parse JSON weather response to extract temperature and condition
+ * @brief Parse JSON weather response to extract temperature, humidity, and condition
  * @param json_body String containing HTTP body payload
  * @param out_data Destination struct for parsed weather data
- * @return true if both fields were parsed successfully, false otherwise
+ * @return true if fields were parsed successfully, false otherwise
  */
 static bool parse_weather_json(const char *json_body, weather_data_t *out_data)
 {
     if (!json_body || !out_data) return false;
 
+    /* 1. Check for Open-Meteo API response structure */
+    const char *p_temp2m = strstr(json_body, "\"temperature_2m\":");
+    const char *p_hum = strstr(json_body, "\"relative_humidity_2m\":");
+    const char *p_wcode = strstr(json_body, "\"weather_code\":");
+
+    if (p_temp2m && p_wcode) {
+        out_data->temperature = (float)atof(p_temp2m + 17);
+        if (p_hum) {
+            out_data->humidity = atoi(p_hum + 23);
+        } else {
+            out_data->humidity = 0;
+        }
+        int code = atoi(p_wcode + 15);
+        strncpy(out_data->condition, wmo_code_to_condition(code), sizeof(out_data->condition) - 1);
+        out_data->condition[sizeof(out_data->condition) - 1] = '\0';
+        out_data->is_valid = true;
+        out_data->last_update_ts = (uint64_t)time(NULL);
+        return true;
+    }
+
+    /* 2. Fallback: Parse local mock server format */
     const char *temp_pos = strstr(json_body, "\"temp\":");
     const char *cond_pos = strstr(json_body, "\"condition\":");
 
@@ -85,7 +151,9 @@ static bool parse_weather_json(const char *json_body, weather_data_t *out_data)
         out_data->condition[idx++] = *cond_pos++;
     }
     out_data->condition[idx] = '\0';
+    out_data->humidity = 65; /* Default mock humidity */
     out_data->is_valid = true;
+    out_data->last_update_ts = (uint64_t)time(NULL);
 
     return true;
 }
@@ -202,17 +270,133 @@ cleanup:
     return success;
 }
 
+static bool fetch_openmeteo_https(weather_data_t *out_data, bool *out_timed_out)
+{
+    if (out_timed_out) *out_timed_out = false;
+    struct hostent *he = gethostbyname(OPENMETEO_HOST);
+    if (!he) {
+        printf("[weather_thread] DNS resolution failed for %s\n", OPENMETEO_HOST);
+        return false;
+    }
+
+    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd < 0) return false;
+
+    /* Set non-blocking mode for connection timeout */
+    int flags = fcntl(sock_fd, F_GETFL, 0);
+    fcntl(sock_fd, F_SETFL, flags | O_NONBLOCK);
+
+    struct sockaddr_in saddr;
+    memset(&saddr, 0, sizeof(saddr));
+    saddr.sin_family = AF_INET;
+    saddr.sin_port = htons(OPENMETEO_PORT);
+    memcpy(&saddr.sin_addr.s_addr, he->h_addr_list[0], he->h_length);
+
+    int res = connect(sock_fd, (struct sockaddr *)&saddr, sizeof(saddr));
+    if (res < 0) {
+        if (errno == EINPROGRESS) {
+            struct pollfd pfd;
+            pfd.fd = sock_fd;
+            pfd.events = POLLOUT;
+            int pret = poll(&pfd, 1, WEATHER_TIMEOUT_SEC * 1000);
+            if (pret <= 0) {
+                if (out_timed_out) *out_timed_out = true;
+                close(sock_fd);
+                return false;
+            }
+            int err = 0;
+            socklen_t elen = sizeof(err);
+            if (getsockopt(sock_fd, SOL_SOCKET, SO_ERROR, &err, &elen) < 0 || err != 0) {
+                close(sock_fd);
+                return false;
+            }
+        } else {
+            close(sock_fd);
+            return false;
+        }
+    }
+
+    /* Set socket back to blocking with timeouts for TLS */
+    fcntl(sock_fd, F_SETFL, flags);
+    struct timeval tv = { .tv_sec = WEATHER_TIMEOUT_SEC, .tv_usec = 0 };
+    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    const SSL_METHOD *method = TLS_client_method();
+    SSL_CTX *ctx = SSL_CTX_new(method);
+    if (!ctx) {
+        close(sock_fd);
+        return false;
+    }
+
+    SSL *ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, sock_fd);
+    SSL_set_tlsext_host_name(ssl, OPENMETEO_HOST);
+
+    bool ok = false;
+    if (SSL_connect(ssl) > 0) {
+        char req[512];
+        snprintf(req, sizeof(req),
+                 "GET %s HTTP/1.1\r\n"
+                 "Host: %s\r\n"
+                 "User-Agent: SmartClock/2.0 (Embedded Linux; RPi Zero 2W)\r\n"
+                 "Accept: application/json\r\n"
+                 "Connection: close\r\n\r\n",
+                 OPENMETEO_PATH, OPENMETEO_HOST);
+
+        SSL_write(ssl, req, strlen(req));
+
+        char resp[4096];
+        int total = 0, n;
+        while ((n = SSL_read(ssl, resp + total, sizeof(resp) - 1 - total)) > 0) {
+            total += n;
+            if (total >= (int)sizeof(resp) - 1) break;
+        }
+        resp[total] = '\0';
+
+        char *body = strstr(resp, "\r\n\r\n");
+        if (body) {
+            body += 4;
+            ok = parse_weather_json(body, out_data);
+        }
+        SSL_shutdown(ssl);
+    }
+
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
+    close(sock_fd);
+    return ok;
+}
+
 static bool fetch_http_weather(weather_data_t *out_data)
 {
+    pthread_mutex_lock(&g_state_mutex);
+    net_mode_t cur_net = g_system_state.net_mode;
+    pthread_mutex_unlock(&g_state_mutex);
+
+    bool is_timeout = false;
+
+    /* 1. Try Real Cloud Open-Meteo HTTPS if in Station mode */
+    if (cur_net == MODE_STATION) {
+        printf("[weather_thread] Querying Live Open-Meteo HTTPS API (%s)...\n", OPENMETEO_HOST);
+        if (fetch_openmeteo_https(out_data, &is_timeout)) {
+            printf("[weather_thread] Live weather fetched: %.1f C, %d%% humidity, %s\n",
+                   out_data->temperature, out_data->humidity, out_data->condition);
+            return true;
+        }
+        printf("[weather_thread] Open-Meteo query failed. Falling back to local mock server...\n");
+    }
+
+    /* 2. Fallback to local mock server */
     int attempt = 0;
     while (attempt < 3) {
         attempt++;
-        bool is_timeout = false;
+        is_timeout = false;
         if (fetch_http_weather_single(out_data, &is_timeout)) {
             return true;
         }
         if (is_timeout) {
-            break; /* Don't retry if 5-second connection timeout expired (TC-P2-06) */
+            break;
         }
 
         pthread_mutex_lock(&g_state_mutex);
@@ -221,7 +405,7 @@ static bool fetch_http_weather(weather_data_t *out_data)
         if (!running) break;
 
         if (attempt < 3) {
-            usleep(300 * 1000); /* 300ms pause for transient startup */
+            usleep(300 * 1000);
         }
     }
     return false;

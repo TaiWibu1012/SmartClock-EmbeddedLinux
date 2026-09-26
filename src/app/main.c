@@ -11,6 +11,7 @@
 #include "webserver.h"
 #include "alarm_manager.h"
 #include "smartconfig.h"
+#include "mqtt_client.h"
 #include "../../include/smartclock_common.h"
 
 #include <stdio.h>
@@ -42,6 +43,7 @@ static pthread_t s_webserver_tid;
 static pthread_t s_buzzer_tid;
 static pthread_t s_smartconfig_tid;
 static pthread_t s_btn_tid;
+static pthread_t s_mqtt_tid;
 
 static void sigusr1_handler(int sig)
 {
@@ -66,6 +68,7 @@ static void signal_handler(int sig)
     if (s_buzzer_tid) pthread_kill(s_buzzer_tid, SIGUSR1);
     if (s_smartconfig_tid) pthread_kill(s_smartconfig_tid, SIGUSR1);
     if (s_btn_tid) pthread_kill(s_btn_tid, SIGUSR1);
+    if (s_mqtt_tid) pthread_kill(s_mqtt_tid, SIGUSR1);
 }
 
 /* Kiểm tra xem file wpa_supplicant.conf đã lưu cấu hình mạng từ trước hay chưa */
@@ -471,6 +474,7 @@ int main(int argc, char *argv[])
     pthread_create(&s_clock_tid, NULL, clock_thread_func, NULL);
     pthread_create(&s_webserver_tid, NULL, webserver_thread_func, NULL);
     pthread_create(&s_btn_tid, NULL, btn_thread_func, NULL);
+    pthread_create(&s_mqtt_tid, NULL, mqtt_thread_func, NULL);
 
     /* Chờ toàn bộ worker threads kết thúc an toàn */
     pthread_join(s_btn_tid, NULL);
@@ -479,6 +483,7 @@ int main(int argc, char *argv[])
     pthread_join(s_webserver_tid, NULL);
     pthread_join(s_buzzer_tid, NULL);
     pthread_join(s_smartconfig_tid, NULL);
+    pthread_join(s_mqtt_tid, NULL);
 
     watchdog_close();
     ssd1306_close();

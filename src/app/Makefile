@@ -4,8 +4,8 @@
 # ==============================================================================
 
 CC ?= $(CROSS_COMPILE)gcc
-CFLAGS ?= -Wall -Wextra -O2 -pipe -I../../include -I.
-LDFLAGS ?= -pthread -lrt -lm
+CFLAGS ?= -Wall -Wextra -O2 -pipe -I../../include -I. -Imqtt
+LDFLAGS ?= -pthread -lrt -lm -lssl -lcrypto
 
 # Target executable name
 TARGET = smartclock
@@ -17,7 +17,10 @@ SRCS = main.c \
        alarm_manager.c \
        smartconfig.c \
        webserver.c \
-       ssd1306_oled.c
+       ssd1306_oled.c \
+       mqtt_client.c \
+       mqtt/mqtt.c \
+       mqtt/mqtt_pal.c
 
 # Object files
 OBJS = $(SRCS:.c=.o)
@@ -43,5 +46,5 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) mqtt/*.o
 	@echo "Cleaned Userspace build artifacts."
