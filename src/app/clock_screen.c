@@ -7,6 +7,7 @@
 #include "clock_screen.h"
 #include "weather_screen.h"
 #include "ssd1306_oled.h"
+#include "ssd1306_icons.h"
 #include "alarm_manager.h"
 
 #include <stdio.h>
@@ -36,27 +37,32 @@ static void render_clock_ui(const struct tm *tm_info, net_mode_t net_mode,
 {
     char time_str[16];
     char header_right[24];
-    char net_str[16];
     char alarm_str[32];
 
     ssd1306_clear();
 
-    /* 1. Header Bar */
+    /* 1. Graphical Header Bar */
     if (net_mode == MODE_SOFT_AP) {
-        snprintf(net_str, sizeof(net_str), "Soft AP");
+        ssd1306_draw_bitmap(2, 1, g_icon_softap, 8, 8, 1);
+        ssd1306_draw_string(12, 1, "AP", 1);
     } else if (net_mode == MODE_TRANSITIONING) {
-        snprintf(net_str, sizeof(net_str), "WiFi..");
+        ssd1306_draw_bitmap(2, 1, g_icon_wifi_low, 8, 8, 1);
+        ssd1306_draw_string(12, 1, "WiFi..", 1);
     } else {
-        snprintf(net_str, sizeof(net_str), "Station");
+        ssd1306_draw_bitmap(2, 1, g_icon_wifi_full, 8, 8, 1);
+        ssd1306_draw_string(12, 1, "STA", 1);
     }
-    ssd1306_draw_string(2, 0, net_str, 1);
+
+    if (alarm_cfg->enabled) {
+        ssd1306_draw_bitmap(38, 1, g_icon_bell, 8, 8, 1);
+    }
 
     snprintf(header_right, sizeof(header_right), "%s %02d/%02d/%02d",
              DAY_NAMES[tm_info->tm_wday],
              tm_info->tm_mday,
              tm_info->tm_mon + 1,
              (tm_info->tm_year + 1900) % 100);
-    ssd1306_draw_string(50, 0, header_right, 1);
+    ssd1306_draw_string(52, 1, header_right, 1);
 
     ssd1306_draw_hline(0, 10, SSD1306_WIDTH, 1);
 
@@ -143,15 +149,15 @@ void *clock_thread_func(void *arg)
         static unsigned long s_tick_count = 0;
         s_tick_count++;
         if (s_tick_count % 60 == 0) {
-            if (s_tick_count == 300) {
-                printf("[clock_thread] Monotonic interval tick #%lu (%lu min elapsed): %02d:%02d:%02d [OK - 0.00s drift]\n",
-                       s_tick_count, s_tick_count / 60,
-                       tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
-            } else {
-                printf("[clock_thread] Monotonic interval tick #%lu (%lu min elapsed): %02d:%02d:%02d [OK]\n",
-                       s_tick_count, s_tick_count / 60,
-                       tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
-            }
+            uint32_t frames = 0, written = 0, skipped = 0;
+            ssd1306_get_stats(&frames, &written, &skipped);
+            float savings = (frames > 0 && (written + skipped) > 0) ?
+                            ((float)skipped / (float)(written + skipped) * 100.0f) : 0.0f;
+
+            printf("[clock_thread] Tick #%lu (%lu min elapsed): %02d:%02d:%02d [OK] | OLED Dirty-Pages: %u written, %u skipped (Saved %.1f%% I2C traffic)\n",
+                   s_tick_count, s_tick_count / 60,
+                   tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec,
+                   written, skipped, savings);
         }
 
         if (ntp_sync_display_counter > 0) {

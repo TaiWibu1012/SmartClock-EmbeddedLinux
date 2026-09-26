@@ -203,6 +203,7 @@ static void dispatch_button_action(uint64_t duration_ms)
                 g_system_state.current_screen = SCREEN_CLOCK;
                 printf("[btn_thread] Screen -> CLOCK\n");
             }
+            ssd1306_force_full_update();
             pthread_cond_broadcast(&g_state_cond);
             pthread_mutex_unlock(&g_state_mutex);
         }

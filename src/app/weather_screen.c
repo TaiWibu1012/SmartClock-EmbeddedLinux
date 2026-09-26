@@ -6,6 +6,7 @@
 
 #include "weather_screen.h"
 #include "ssd1306_oled.h"
+#include "ssd1306_icons.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -234,7 +235,6 @@ static bool fetch_http_weather(weather_data_t *out_data)
 void render_weather_ui(const weather_data_t *data, net_mode_t net_mode)
 {
     char temp_str[16];
-    char net_str[24];
     char ip_str[24] = "No IP";
     char footer_str[32];
 
@@ -253,16 +253,20 @@ void render_weather_ui(const weather_data_t *data, net_mode_t net_mode)
      * 1. HEADER BAR (Y: 0 -> 10)
      * ========================================================================= */
     if (net_mode == MODE_SOFT_AP) {
-        snprintf(net_str, sizeof(net_str), "SoftAP Weather");
+        ssd1306_draw_bitmap(2, 1, g_icon_softap, 8, 8, 1);
+        ssd1306_draw_string(14, 1, "AP WEATHER", 1);
+    } else if (net_mode == MODE_TRANSITIONING) {
+        ssd1306_draw_bitmap(2, 1, g_icon_wifi_low, 8, 8, 1);
+        ssd1306_draw_string(14, 1, "CONNECTING..", 1);
     } else {
-        snprintf(net_str, sizeof(net_str), "Station Weather");
+        ssd1306_draw_bitmap(2, 1, g_icon_wifi_full, 8, 8, 1);
+        ssd1306_draw_string(14, 1, "STA WEATHER", 1);
     }
-    ssd1306_draw_string(2, 0, net_str, 1);
 
     if (data->is_valid) {
-        ssd1306_draw_string(102, 0, "[OK]", 1);
+        ssd1306_draw_string(98, 1, "[LIVE]", 1);
     } else {
-        ssd1306_draw_string(96, 0, "[OFF]", 1);
+        ssd1306_draw_string(98, 1, "[OFF]", 1);
     }
 
     ssd1306_draw_hline(0, 10, SSD1306_WIDTH, 1);
@@ -271,33 +275,44 @@ void render_weather_ui(const weather_data_t *data, net_mode_t net_mode)
      * 2. MAIN CENTER BODY (Y: 11 -> 48)
      * ========================================================================= */
     if (data->is_valid) {
-        /* Centered Temperature */
-        snprintf(temp_str, sizeof(temp_str), "%.1f C", data->temperature);
-        int temp_len = strlen(temp_str);
-        int temp_x = (SSD1306_WIDTH - (temp_len * 12)) / 2;
-        if (temp_x < 2) temp_x = 2;
-        ssd1306_draw_string(temp_x, 16, temp_str, 2);
+        /* Weather Icon (16x16) based on condition keyword */
+        if (strstr(data->condition, "Rain") != NULL || strstr(data->condition, "Drizzle") != NULL) {
+            ssd1306_draw_bitmap(10, 20, g_icon_rain_16x16, 16, 16, 1);
+        } else if (strstr(data->condition, "Cloud") != NULL || strstr(data->condition, "Overcast") != NULL) {
+            ssd1306_draw_bitmap(10, 20, g_icon_cloud_16x16, 16, 16, 1);
+        } else {
+            ssd1306_draw_bitmap(10, 20, g_icon_sun_16x16, 16, 16, 1);
+        }
 
-        /* Centered Condition */
-        int cond_len = strlen(data->condition);
-        int cond_x = (SSD1306_WIDTH - (cond_len * 6)) / 2;
-        if (cond_x < 2) cond_x = 2;
-        ssd1306_draw_string(cond_x, 35, data->condition, 1);
+        /* Large Temperature next to icon */
+        snprintf(temp_str, sizeof(temp_str), "%.1f C", data->temperature);
+        ssd1306_draw_string(34, 16, temp_str, 2);
+
+        /* Weather Condition string */
+        ssd1306_draw_string(34, 35, data->condition, 1);
+
+        /* Humidity with droplet icon if available */
+        if (data->humidity > 0) {
+            char hum_str[16];
+            ssd1306_draw_bitmap(88, 35, g_icon_drop, 8, 8, 1);
+            snprintf(hum_str, sizeof(hum_str), "%d%%", data->humidity);
+            ssd1306_draw_string(98, 35, hum_str, 1);
+        }
     } else {
-        ssd1306_draw_string(22, 20, "NO CONNECTION", 1);
-        ssd1306_draw_string(10, 34, "Check Wi-Fi Router", 1);
+        ssd1306_draw_bitmap(8, 22, g_icon_wifi_none, 8, 8, 1);
+        ssd1306_draw_string(22, 20, "NO WEATHER DATA", 1);
+        ssd1306_draw_string(22, 34, "Checking network...", 1);
     }
 
     /* =========================================================================
-     * 3. FOOTER BAR (Y: 49 -> 63) - SHORTENED URL TO PREVENT OVERFLOW
+     * 3. FOOTER BAR (Y: 49 -> 63)
      * ========================================================================= */
     ssd1306_draw_hline(0, 49, SSD1306_WIDTH, 1);
 
     if (strcmp(ip_str, "No IP") != 0) {
-        /* Format: "192.168.55.15:8080" (fits 128px screen) */
-        snprintf(footer_str, sizeof(footer_str), "%s:%d", ip_str, DEFAULT_HTTP_PORT);
+        snprintf(footer_str, sizeof(footer_str), "IP: %s:%d", ip_str, DEFAULT_HTTP_PORT);
     } else {
-        snprintf(footer_str, sizeof(footer_str), "Disconnected");
+        snprintf(footer_str, sizeof(footer_str), "Status: Disconnected");
     }
 
     int footer_len = strlen(footer_str);
@@ -308,6 +323,7 @@ void render_weather_ui(const weather_data_t *data, net_mode_t net_mode)
 
     ssd1306_update();
 }
+
 
 void *weather_thread_func(void *arg)
 {

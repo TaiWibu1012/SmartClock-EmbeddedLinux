@@ -22,6 +22,13 @@
 
 static int s_i2c_fd = -1;
 static uint8_t s_oled_buffer[SSD1306_BUFSIZE];
+static uint8_t s_oled_shadow_buffer[SSD1306_BUFSIZE];
+static bool s_force_full_refresh = true;
+
+/* Telemetry counters for dirty page engine */
+static uint32_t s_frames_rendered = 0;
+static uint32_t s_pages_written = 0;
+static uint32_t s_pages_skipped = 0;
 
 /* 
  * Thread Safety Guarantee:
@@ -190,7 +197,12 @@ int ssd1306_init(const char *i2c_dev_path, uint8_t i2c_addr)
     ssd1306_send_command(0xA6); /* Normal Display */
     ssd1306_send_command(0xAF); /* Display ON */
 
-    ssd1306_clear();
+    memset(s_oled_buffer, 0x00, sizeof(s_oled_buffer));
+    memset(s_oled_shadow_buffer, 0xFF, sizeof(s_oled_shadow_buffer));
+    s_force_full_refresh = true;
+    s_frames_rendered = 0;
+    s_pages_written = 0;
+    s_pages_skipped = 0;
     ssd1306_update();
     return 0;
 }
@@ -201,6 +213,7 @@ void ssd1306_close(void)
     pthread_mutex_lock(&s_oled_mutex);
     if (s_i2c_fd >= 0) {
         memset(s_oled_buffer, 0x00, sizeof(s_oled_buffer));
+        memset(s_oled_shadow_buffer, 0x00, sizeof(s_oled_shadow_buffer));
         ssd1306_send_command(0xAE);
         close(s_i2c_fd);
         s_i2c_fd = -1;
@@ -216,6 +229,24 @@ void ssd1306_clear(void)
     pthread_mutex_unlock(&s_oled_mutex);
 }
 
+void ssd1306_force_full_update(void)
+{
+    ensure_mutex_initialized();
+    pthread_mutex_lock(&s_oled_mutex);
+    s_force_full_refresh = true;
+    pthread_mutex_unlock(&s_oled_mutex);
+}
+
+void ssd1306_get_stats(uint32_t *out_frames, uint32_t *out_pages_written, uint32_t *out_pages_skipped)
+{
+    ensure_mutex_initialized();
+    pthread_mutex_lock(&s_oled_mutex);
+    if (out_frames) *out_frames = s_frames_rendered;
+    if (out_pages_written) *out_pages_written = s_pages_written;
+    if (out_pages_skipped) *out_pages_skipped = s_pages_skipped;
+    pthread_mutex_unlock(&s_oled_mutex);
+}
+
 void ssd1306_update(void)
 {
     ensure_mutex_initialized();
@@ -227,17 +258,32 @@ void ssd1306_update(void)
 
     uint8_t tx_buf[SSD1306_WIDTH + 1];
     tx_buf[0] = 0x40; /* Data mode */
+    s_frames_rendered++;
 
     for (uint8_t page = 0; page < SSD1306_PAGES; page++) {
+        uint8_t *curr_page = &s_oled_buffer[page * SSD1306_WIDTH];
+        uint8_t *shadow_page = &s_oled_shadow_buffer[page * SSD1306_WIDTH];
+
+        /* If page hasn't changed and full refresh not requested, skip I2C bus write! */
+        if (!s_force_full_refresh && memcmp(curr_page, shadow_page, SSD1306_WIDTH) == 0) {
+            s_pages_skipped++;
+            continue;
+        }
+
+        s_pages_written++;
+        memcpy(shadow_page, curr_page, SSD1306_WIDTH);
+
         ssd1306_send_command(0xB0 + page); /* Page address */
         ssd1306_send_command(0x02);        /* Lower column start (SH1106 offset 2px) */
         ssd1306_send_command(0x10);        /* Higher column start */
 
-        memcpy(&tx_buf[1], &s_oled_buffer[page * SSD1306_WIDTH], SSD1306_WIDTH);
+        memcpy(&tx_buf[1], curr_page, SSD1306_WIDTH);
         if (write(s_i2c_fd, tx_buf, sizeof(tx_buf)) < 0) {
             perror("ssd1306: page write failed");
         }
     }
+
+    s_force_full_refresh = false;
     pthread_mutex_unlock(&s_oled_mutex);
 }
 
@@ -311,7 +357,127 @@ void ssd1306_draw_hline(int x, int y, int length, uint8_t color)
     ensure_mutex_initialized();
     pthread_mutex_lock(&s_oled_mutex);
     for (int i = 0; i < length; i++) {
-        ssd1306_draw_pixel_unlocked(x + i, y, color);
+        ssd1306_draw_pixel_unlocked(x + i, y + i * 0, color);
     }
+    pthread_mutex_unlock(&s_oled_mutex);
+}
+
+void ssd1306_draw_vline(int x, int y, int height, uint8_t color)
+{
+    ensure_mutex_initialized();
+    pthread_mutex_lock(&s_oled_mutex);
+    for (int i = 0; i < height; i++) {
+        ssd1306_draw_pixel_unlocked(x, y + i, color);
+    }
+    pthread_mutex_unlock(&s_oled_mutex);
+}
+
+static void ssd1306_draw_line_unlocked(int x0, int y0, int x1, int y1, uint8_t color)
+{
+    int dx = abs(x1 - x0);
+    int sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0);
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+
+    while (1) {
+        ssd1306_draw_pixel_unlocked(x0, y0, color);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+void ssd1306_draw_line(int x0, int y0, int x1, int y1, uint8_t color)
+{
+    ensure_mutex_initialized();
+    pthread_mutex_lock(&s_oled_mutex);
+    ssd1306_draw_line_unlocked(x0, y0, x1, y1, color);
+    pthread_mutex_unlock(&s_oled_mutex);
+}
+
+void ssd1306_draw_rect(int x, int y, int w, int h, uint8_t color)
+{
+    if (w <= 0 || h <= 0) return;
+    ensure_mutex_initialized();
+    pthread_mutex_lock(&s_oled_mutex);
+    for (int i = 0; i < w; i++) {
+        ssd1306_draw_pixel_unlocked(x + i, y, color);
+        ssd1306_draw_pixel_unlocked(x + i, y + h - 1, color);
+    }
+    for (int i = 0; i < h; i++) {
+        ssd1306_draw_pixel_unlocked(x, y + i, color);
+        ssd1306_draw_pixel_unlocked(x + w - 1, y + i, color);
+    }
+    pthread_mutex_unlock(&s_oled_mutex);
+}
+
+static void ssd1306_draw_circle_unlocked(int x0, int y0, int r, uint8_t color)
+{
+    int f = 1 - r;
+    int ddF_x = 1;
+    int ddF_y = -2 * r;
+    int x = 0;
+    int y = r;
+
+    ssd1306_draw_pixel_unlocked(x0, y0 + r, color);
+    ssd1306_draw_pixel_unlocked(x0, y0 - r, color);
+    ssd1306_draw_pixel_unlocked(x0 + r, y0, color);
+    ssd1306_draw_pixel_unlocked(x0 - r, y0, color);
+
+    while (x < y) {
+        if (f >= 0) {
+            y--;
+            ddF_y += 2;
+            f += ddF_y;
+        }
+        x++;
+        ddF_x += 2;
+        f += ddF_x;
+
+        ssd1306_draw_pixel_unlocked(x0 + x, y0 + y, color);
+        ssd1306_draw_pixel_unlocked(x0 - x, y0 + y, color);
+        ssd1306_draw_pixel_unlocked(x0 + x, y0 - y, color);
+        ssd1306_draw_pixel_unlocked(x0 - x, y0 - y, color);
+        ssd1306_draw_pixel_unlocked(x0 + y, y0 + x, color);
+        ssd1306_draw_pixel_unlocked(x0 - y, y0 + x, color);
+        ssd1306_draw_pixel_unlocked(x0 + y, y0 - x, color);
+        ssd1306_draw_pixel_unlocked(x0 - y, y0 - x, color);
+    }
+}
+
+void ssd1306_draw_circle(int x0, int y0, int r, uint8_t color)
+{
+    ensure_mutex_initialized();
+    pthread_mutex_lock(&s_oled_mutex);
+    ssd1306_draw_circle_unlocked(x0, y0, r, color);
+    pthread_mutex_unlock(&s_oled_mutex);
+}
+
+static void ssd1306_draw_bitmap_unlocked(int x, int y, const uint8_t *bitmap, int w, int h, uint8_t color)
+{
+    if (!bitmap || w <= 0 || h <= 0) return;
+    int byte_width = (w + 7) / 8;
+    for (int j = 0; j < h; j++) {
+        for (int i = 0; i < w; i++) {
+            if (bitmap[j * byte_width + (i / 8)] & (0x80 >> (i % 8))) {
+                ssd1306_draw_pixel_unlocked(x + i, y + j, color);
+            }
+        }
+    }
+}
+
+void ssd1306_draw_bitmap(int x, int y, const uint8_t *bitmap, int w, int h, uint8_t color)
+{
+    ensure_mutex_initialized();
+    pthread_mutex_lock(&s_oled_mutex);
+    ssd1306_draw_bitmap_unlocked(x, y, bitmap, w, h, color);
     pthread_mutex_unlock(&s_oled_mutex);
 }

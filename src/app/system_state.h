@@ -34,6 +34,7 @@ typedef struct {
 /* Weather Data Structure */
 typedef struct {
     float temperature;
+    int   humidity;          /* e.g., 65 (%) */
     char condition[32];      /* e.g., "Sunny", "Rainy", "Cloudy" */
     uint64_t last_update_ts; /* Monotonic timestamp in seconds */
     bool is_valid;           /* true: Data fresh, false: Net error / uninitialized */
