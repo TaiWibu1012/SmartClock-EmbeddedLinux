@@ -9,13 +9,18 @@
 
 ## 1. Giới thiệu Dự án
 
-**Smart Weather Alarm Clock** là sản phẩm nhúng hoàn chỉnh kết hợp giữa Lập trình Driver Nhân Linux (Kernel-space) và Ứng dụng Đa luồng (User-space Systems Programming):
-* **Driver Nút nhấn Đa chức năng (`/dev/btn_driver`):** Bắt ngắt 2 cạnh (`IRQ_TYPE_EDGE_BOTH`), lọc rung phím 20ms trong kernel và ghi nhận timestamp nanosecond bằng `ktime_get_ns()`.
-* **Driver Còi Buzzer (`/dev/buzzer_driver`):** Sử dụng `hrtimer` trong nhân Linux để xuất xung vuông chính xác tần số 2000 Hz điều khiển còi báo thức.
-* **Màn hình OLED SSD1306 (128x64):** Giao tiếp I2C trực tiếp qua `/dev/i2c-1` (địa chỉ `0x3C`), hỗ trợ 2 màn hình (Đồng hồ & Thời tiết).
-* **Mạng Wi-Fi & Smart Config:** Tự động chuyển đổi giữa **Soft AP** (`wpa_supplicant` mode=2 + `udhcpd`) và **Station** (`wpa_supplicant` + `udhcpc`), có cơ chế timeout 20s tự khôi phục Soft AP khi sai mật khẩu.
-* **Đồng bộ Thời gian & Báo thức:** Client SNTP UDP thuần đồng bộ giờ chuẩn UTC+7; lưu cấu hình báo thức bằng kỹ thuật **Atomic Write** (`.tmp` $\rightarrow$ `fsync` $\rightarrow$ `rename`).
-* **Webserver Cấu hình Nhúng:** Socket C thuần (port 8080) phục vụ giao diện Web cấu hình Wi-Fi và đặt giờ báo thức.
+**Smart Weather Alarm Clock** là sản phẩm nhúng hoàn chỉnh kết hợp giữa Lập trình Driver Nhân Linux (Kernel-space), Ứng dụng Đa luồng Hiệu năng cao (User-space Systems Programming), và Nền tảng IoT Điện toán đám mây:
+
+### 🌟 Tính Năng Đột Phá ở Phiên Bản v2.0 (Industrial Embedded IoT):
+1. **Linux Input Subsystem (`evdev`):** Driver nút nhấn refactor sang kiến trúc chuẩn của Linux kernel (`struct input_dev`, `input_report_key()`, `input_sync()`), phát sinh sự kiện chuẩn `EV_KEY` (`KEY_POWER`) qua `/dev/input/event0..9`.
+2. **Kernel Sysfs Observability:** Bổ sung giao diện chẩn đoán Sysfs (`/sys/devices/platform/.../press_count` và `debounce_drops`) để giám sát số lần nhấn phím và số ngắt rung bị lọc trực tiếp từ dòng lệnh.
+3. **Hardware Watchdog (`/dev/watchdog`):** Tích hợp chip BCM2835 Hardware Watchdog với chu kỳ 15s, heartbeat đồng bộ từ timer monotonic 1s và Magic Close (`'V'`) an toàn chống deadlock/treo cứng hệ thống 24/7.
+4. **Differential Dirty-Page Graphics Engine:** Thuật toán so sánh bộ đệm bóng (Shadow Buffer) trên màn hình OLED SSD1306, chỉ truyền các trang bộ nhớ có thay đổi qua I2C. Giảm tải từ 1032 bytes/frame xuống còn 128 - 256 bytes/frame (**tiết kiệm 75% - 90% băng thông bus I2C**).
+5. **Bộ Nguyên Ngữ Đồ Họa 2D & Bitmap Icons:** Tích hợp thuật toán Bresenham Line & Midpoint Circle 100% số nguyên (CPU load 0%), hiển thị icon Wi-Fi 3 vạch, icon Soft AP, icon chuông báo thức và bộ icon thời tiết 16x16 pixel (Nắng, Mây, Mưa).
+6. **Live Weather API qua HTTPS/TLS (Open-Meteo):** Truy vấn thời tiết thời gian thực toàn cầu trực tiếp qua giao thức bảo mật HTTPS/TLS với thư viện **OpenSSL**, giải mã JSON động lấy nhiệt độ, độ ẩm và WMO weather code (không cần API Key).
+7. **Cloud IoT Telemetry & Remote Control (MQTT-C):** Tích hợp thư viện MQTT-C siêu nhẹ (15 KB), kết nối tới Public Broker `broker.hivemq.com:1883`:
+   * **Telemetry (Publish):** Đẩy dữ liệu trạng thái hệ thống định kỳ mỗi 30s lên topic `smartclock/tai/telemetry`.
+   * **Control (Subscribe):** Lắng nghe lệnh từ xa trên topic `smartclock/tai/command` để tắt còi báo thức, cấu hình giờ báo thức, hoặc chuyển đổi màn hình OLED từ xa qua smartphone/dashboard.
 
 ---
 
