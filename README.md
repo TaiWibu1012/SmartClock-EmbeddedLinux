@@ -9,18 +9,20 @@
 
 ## 1. Giới thiệu Dự án
 
-**Smart Weather Alarm Clock** là sản phẩm nhúng hoàn chỉnh kết hợp giữa Lập trình Driver Nhân Linux (Kernel-space), Ứng dụng Đa luồng Hiệu năng cao (User-space Systems Programming), và Nền tảng IoT Điện toán đám mây:
+**Smart Weather Alarm Clock** là dự án đồng hồ báo thức kiêm hiển thị thời tiết trên Raspberry Pi Zero W / Zero 2W. Dự án kết hợp giữa lập trình driver trong nhân Linux (kernel-space) và ứng dụng đa luồng trong không gian người dùng (user-space).
 
-### 🌟 Tính Năng Đột Phá ở Phiên Bản v2.0 (Industrial Embedded IoT):
-1. **Linux Input Subsystem (`evdev`):** Driver nút nhấn refactor sang kiến trúc chuẩn của Linux kernel (`struct input_dev`, `input_report_key()`, `input_sync()`), phát sinh sự kiện chuẩn `EV_KEY` (`KEY_POWER`) qua `/dev/input/event0..9`.
-2. **Kernel Sysfs Observability:** Bổ sung giao diện chẩn đoán Sysfs (`/sys/devices/platform/.../press_count` và `debounce_drops`) để giám sát số lần nhấn phím và số ngắt rung bị lọc trực tiếp từ dòng lệnh.
-3. **Hardware Watchdog (`/dev/watchdog`):** Tích hợp chip BCM2835 Hardware Watchdog với chu kỳ 15s, heartbeat đồng bộ từ timer monotonic 1s và Magic Close (`'V'`) an toàn chống deadlock/treo cứng hệ thống 24/7.
-4. **Differential Dirty-Page Graphics Engine:** Thuật toán so sánh bộ đệm bóng (Shadow Buffer) trên màn hình OLED SSD1306, chỉ truyền các trang bộ nhớ có thay đổi qua I2C. Giảm tải từ 1032 bytes/frame xuống còn 128 - 256 bytes/frame (**tiết kiệm 75% - 90% băng thông bus I2C**).
-5. **Bộ Nguyên Ngữ Đồ Họa 2D & Bitmap Icons:** Tích hợp thuật toán Bresenham Line & Midpoint Circle 100% số nguyên (CPU load 0%), hiển thị icon Wi-Fi 3 vạch, icon Soft AP, icon chuông báo thức và bộ icon thời tiết 16x16 pixel (Nắng, Mây, Mưa).
-6. **Live Weather API qua HTTPS/TLS (Open-Meteo):** Truy vấn thời tiết thời gian thực toàn cầu trực tiếp qua giao thức bảo mật HTTPS/TLS với thư viện **OpenSSL**, giải mã JSON động lấy nhiệt độ, độ ẩm và WMO weather code (không cần API Key).
-7. **Cloud IoT Telemetry & Remote Control (MQTT-C):** Tích hợp thư viện MQTT-C siêu nhẹ (15 KB), kết nối tới Public Broker `broker.hivemq.com:1883`:
-   * **Telemetry (Publish):** Đẩy dữ liệu trạng thái hệ thống định kỳ mỗi 30s lên topic `smartclock/tai/telemetry`.
-   * **Control (Subscribe):** Lắng nghe lệnh từ xa trên topic `smartclock/tai/command` để tắt còi báo thức, cấu hình giờ báo thức, hoặc chuyển đổi màn hình OLED từ xa qua smartphone/dashboard.
+Dự án được xây dựng và phát triển theo từng giai đoạn: phiên bản v1.0 sử dụng character driver truyền thống, và phiên bản v2.0 nâng cấp lên kiến trúc driver chuẩn, tối ưu hiển thị màn hình và kết nối dịch vụ cloud.
+
+### Những điểm cải tiến trong phiên bản v2.0:
+1. **Chuẩn hóa driver nút nhấn bằng Input Subsystem (`evdev`):** Chuyển từ character device tự viết sang `struct input_dev`, phát sinh mã sự kiện chuẩn `EV_KEY` (`KEY_POWER`) qua `/dev/input/event*`. Ứng dụng đọc sự kiện qua API input chuẩn của Linux thay vì đọc file device riêng.
+2. **Theo dõi thông số driver qua Sysfs:** Cung cấp 2 node `/sys/devices/platform/.../press_count` (đếm số lần nhấn) và `debounce_drops` (số ngắt rung đã lọc) để dễ kiểm tra trạng thái hoạt động của phím trực tiếp từ dòng lệnh.
+3. **Bảo vệ hệ thống bằng Hardware Watchdog (`/dev/watchdog`):** Kích hoạt watchdog phần cứng của chip BCM2835 với chu kỳ 15 giây. Luồng đồng hồ ping định kỳ mỗi 1 giây; nếu có luồng bị deadlock hoặc crash quá 15 giây thì chip sẽ tự reset. Khi ứng dụng tắt bình thường, chương trình gửi ký tự `'V'` (magic close) để tắt watchdog an toàn.
+4. **Tối ưu truyền dữ liệu OLED qua cơ chế Dirty-Page:** Sử dụng buffer bóng (shadow buffer) để so sánh từng page trước khi gửi qua I2C. Những page không có thay đổi (ví dụ khi chỉ có số giây nhảy ở giữa màn hình) sẽ được bỏ qua, giúp giảm từ 75% đến 90% lưu lượng truyền trên bus I2C.
+5. **Vẽ icon bitmap và nguyên ngữ đồ họa bằng số nguyên:** Bổ sung các hàm vẽ đường thẳng (Bresenham) và đường tròn chỉ dùng phép toán số nguyên (không dùng `float`), kèm bộ icon bitmap 1-bit gồm cột sóng Wi-Fi, trạng thái Soft AP, chuông báo thức và biểu tượng thời tiết.
+6. **Lấy dữ liệu thời tiết thực tế qua HTTPS (Open-Meteo):** Dùng OpenSSL kết nối HTTPS tới `api.open-meteo.com` (miễn phí, không cần API key), tự giải mã JSON để lấy nhiệt độ, độ ẩm và trạng thái thời tiết. Nếu mất mạng, hệ thống tự động chuyển về dùng server giả lập nội bộ.
+7. **Giám sát và điều khiển từ xa qua MQTT (MQTT-C):** Tích hợp thư viện MQTT-C gọn nhẹ (~15 KB), kết nối tới broker HiveMQ:
+   * **Gửi dữ liệu (Publish):** Định kỳ 30 giây gửi trạng thái của đồng hồ (nhiệt độ, độ ẩm, giờ báo thức, màn hình hiện tại) lên topic `smartclock/tai/telemetry`.
+   * **Nhận lệnh (Subscribe):** Lắng nghe lệnh từ topic `smartclock/tai/command` để tắt còi báo thức, chỉnh giờ báo thức hoặc chuyển màn hình từ xa.
 
 ---
 
@@ -36,45 +38,46 @@
 
 ---
 
-## 3. Cấu trúc Thư mục Bàn giao Chuẩn
+## 3. Cấu trúc Thư mục Dự án
 
 ```text
-submission/
-├── AGENTS.md                          # Tài liệu cấu hình hệ thống & quy chuẩn lập trình
-├── DESIGN.md                          # Bản thiết kế kiến trúc hệ thống (Software Design Document)
+SmartClock/
 ├── README.md                          # Hướng dẫn tổng quan, sơ đồ nối chân, build & run
 ├── devicetree/
 │   ├── smartclock-overlay.dts         # Source Device Tree Overlay (GPIO 17, 27, I2C1)
 │   └── smartclock-overlay.dtbo        # Binary Device Tree Blob đã biên dịch
 ├── docs/
-│   ├── test_report.md                 # Báo cáo kết quả 11 Test Cases & Bằng chứng Debug
+│   ├── test_report.md                 # Báo cáo kết quả kiểm thử & kịch bản debug
 │   ├── debug_logs/
-│   │   ├── helgrind.log               # Log phân tích đa luồng Helgrind (0 errors)
-│   │   ├── valgrind.log               # Log phân tích bộ nhớ Valgrind Memcheck (0 leaks)
-│   │   ├── strace.log                 # Log theo dõi syscalls (timerfd, socket, poll)
-│   │   └── gdb.log                    # Log kiểm thử GDB backtrace 6 worker threads
+│   │   ├── helgrind.log               # Log phân tích đa luồng Helgrind
+│   │   ├── valgrind.log               # Log phân tích bộ nhớ Valgrind Memcheck
+│   │   ├── strace.log                 # Log theo dõi syscalls
+│   │   └── gdb.log                    # Log kiểm thử GDB backtrace worker threads
 │   └── demo/
-│       └── demo_links.txt             # Đường dẫn video demo minh chứng cho Mentor
+│       └── demo_links.txt             # Đường dẫn video demo
 ├── include/
 │   └── smartclock_common.h            # Header dùng chung Kernel & Userspace
 ├── src/
-│   ├── Makefile                       # Top-level Makefile quản lý build toàn bộ dự án
+│   ├── Makefile                       # Top-level Makefile
 │   ├── driver/
 │   │   ├── Makefile                   # Kbuild Makefile cho Kernel Modules
-│   │   ├── btn_driver.c               # Character Driver nút nhấn GPIO ngắt 2 cạnh
-│   │   └── buzzer_driver.c            # Character Driver còi buzzer hrtimer 2 kHz
+│   │   ├── btn_driver.c               # Driver nút nhấn (Input subsystem / evdev)
+│   │   └── buzzer_driver.c            # Driver còi buzzer hrtimer 2 kHz
 │   └── app/
 │       ├── Makefile                   # Makefile biên dịch ứng dụng Userspace
-│       ├── main.c                     # Luồng chính, quản lý vòng đời và bắt signal
+│       ├── main.c                     # Khởi tạo hệ thống, watchdog, điều phối luồng
 │       ├── system_state.h             # Cấu trúc Shared State & Mutex boundary
-│       ├── clock_screen.c/.h          # Màn hình đồng hồ (timerfd 1s + time(NULL))
-│       ├── weather_screen.c/.h        # Màn hình thời tiết (Socket Non-blocking 5s)
-│       ├── alarm_manager.c/.h         # So giờ báo thức, kích còi, Atomic Write config
+│       ├── clock_screen.c/.h          # Màn hình đồng hồ (timerfd 1s)
+│       ├── weather_screen.c/.h        # Màn hình thời tiết (Open-Meteo HTTPS / mock fallback)
+│       ├── alarm_manager.c/.h         # Quản lý báo thức, kích còi, Atomic Write config
 │       ├── smartconfig.c/.h           # Quản lý mạng Soft AP <-> Station, SNTP client
-│       ├── webserver.c/.h             # Socket HTTP server thuần (Port 8080)
-│       └── ssd1306_oled.c/.h          # Thư viện đồ hoạ I2C OLED SSD1306
+│       ├── webserver.c/.h             # HTTP server cấu hình nhúng (Port 8080)
+│       ├── ssd1306_oled.c/.h          # Driver OLED I2C với dirty-page update & 2D primitives
+│       ├── ssd1306_icons.h            # Bộ icon bitmap (Wi-Fi, Soft AP, chuông, thời tiết)
+│       ├── mqtt_client.c/.h           # Client MQTT điều khiển và gửi telemetry
+│       └── mqtt/                      # Thư viện MQTT-C gọn nhẹ
 └── systemd/
-    └── smartclock.service             # Systemd Unit File tự khởi động cùng hệ thống
+    └── smartclock.service             # Systemd Unit File tự khởi động cùng OS
 ```
 
 ---
