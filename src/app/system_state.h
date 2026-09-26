@@ -67,4 +67,9 @@ extern system_state_t  g_system_state;
 void system_state_init(void);
 void system_state_destroy(void);
 
+/* Hardware Watchdog Integration */
+void watchdog_init(void);
+void watchdog_keepalive(void);
+void watchdog_close(void);
+
 #endif /* _SYSTEM_STATE_H_ */

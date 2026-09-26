@@ -24,6 +24,9 @@
 #include <pthread.h>
 #include <errno.h>
 #include <sys/wait.h>
+#include <sys/ioctl.h>
+#include <linux/input.h>
+#include <linux/watchdog.h>
 
 #define BTN_SHORT_PRESS_MIN_MS    50
 #define BTN_LONG_PRESS_MIN_MS     5000
@@ -208,15 +211,120 @@ static void dispatch_button_action(uint64_t duration_ms)
     }
 }
 
+/* =========================================================================
+ * Hardware Watchdog Management (/dev/watchdog)
+ * ========================================================================= */
+#define WATCHDOG_DEFAULT_TIMEOUT_SEC 15
+static int s_wdt_fd = -1;
+
+void watchdog_init(void)
+{
+    s_wdt_fd = open(WATCHDOG_DEV_PATH, O_WRONLY);
+    if (s_wdt_fd < 0) {
+        printf("[watchdog] Hardware watchdog '%s' unavailable (%s). Running in software-only mode.\n",
+               WATCHDOG_DEV_PATH, strerror(errno));
+        return;
+    }
+
+    int timeout = WATCHDOG_DEFAULT_TIMEOUT_SEC;
+    if (ioctl(s_wdt_fd, WDIOC_SETTIMEOUT, &timeout) == 0) {
+        printf("[watchdog] Hardware watchdog armed with %d-second timeout.\n", timeout);
+    } else {
+        if (ioctl(s_wdt_fd, WDIOC_GETTIMEOUT, &timeout) == 0) {
+            printf("[watchdog] Hardware watchdog armed (default kernel timeout: %d sec).\n", timeout);
+        } else {
+            printf("[watchdog] Hardware watchdog armed.\n");
+        }
+    }
+}
+
+void watchdog_keepalive(void)
+{
+    if (s_wdt_fd >= 0) {
+        int dummy = 0;
+        if (ioctl(s_wdt_fd, WDIOC_KEEPALIVE, &dummy) != 0) {
+            ssize_t written = write(s_wdt_fd, "\0", 1);
+            (void)written;
+        }
+    }
+}
+
+void watchdog_close(void)
+{
+    if (s_wdt_fd >= 0) {
+        /* Magic Close: Write 'V' before closing to disarm watchdog cleanly */
+        ssize_t written = write(s_wdt_fd, "V", 1);
+        (void)written;
+        close(s_wdt_fd);
+        s_wdt_fd = -1;
+        printf("[watchdog] Hardware watchdog disarmed and closed safely.\n");
+    }
+}
+
+/* =========================================================================
+ * Button Input Subsystem & Fallback Dispatcher
+ * ========================================================================= */
+typedef enum {
+    BTN_DEV_TYPE_NONE = 0,
+    BTN_DEV_TYPE_EVDEV,
+    BTN_DEV_TYPE_LEGACY_CHAR
+} btn_dev_type_t;
+
+static int open_button_device(btn_dev_type_t *out_type)
+{
+    char path[64];
+    char name[256];
+
+    /* 1. Proactive auto-scan: Search /dev/input/event0..9 for matching device name */
+    for (int i = 0; i < 10; i++) {
+        snprintf(path, sizeof(path), "/dev/input/event%d", i);
+        int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            memset(name, 0, sizeof(name));
+            if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 0) {
+                if (strstr(name, "SmartClock") != NULL) {
+                    printf("[btn_thread] Detected input device '%s' at %s\n", name, path);
+                    *out_type = BTN_DEV_TYPE_EVDEV;
+                    return fd;
+                }
+            }
+            close(fd);
+        }
+    }
+
+    /* 2. Fallback check: default evdev path BTN_DEV_PATH */
+    int fd = open(BTN_DEV_PATH, O_RDONLY);
+    if (fd >= 0) {
+        memset(name, 0, sizeof(name));
+        if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 0) {
+            printf("[btn_thread] Opened evdev input device '%s' at %s\n", name, BTN_DEV_PATH);
+            *out_type = BTN_DEV_TYPE_EVDEV;
+            return fd;
+        }
+        close(fd);
+    }
+
+    /* 3. Fallback check: legacy character driver BTN_FALLBACK_PATH */
+    fd = open(BTN_FALLBACK_PATH, O_RDONLY);
+    if (fd >= 0) {
+        printf("[btn_thread] Opened fallback legacy char device at %s\n", BTN_FALLBACK_PATH);
+        *out_type = BTN_DEV_TYPE_LEGACY_CHAR;
+        return fd;
+    }
+
+    *out_type = BTN_DEV_TYPE_NONE;
+    return -1;
+}
+
 static void *btn_thread_func(void *arg)
 {
     (void)arg;
     int btn_fd = -1;
-    struct button_event ev;
-    uint64_t press_timestamp_ns = 0;
+    btn_dev_type_t dev_type = BTN_DEV_TYPE_NONE;
+    uint64_t press_timestamp_ms = 0;
     uint64_t last_release_time_ms = 0;
 
-    printf("[btn_thread] Opening button device node: %s...\n", BTN_DEV_PATH);
+    printf("[btn_thread] Scanning for button device...\n");
 
     while (1) {
         pthread_mutex_lock(&g_state_mutex);
@@ -224,12 +332,13 @@ static void *btn_thread_func(void *arg)
         pthread_mutex_unlock(&g_state_mutex);
         if (!is_running) return NULL;
 
-        btn_fd = open(BTN_DEV_PATH, O_RDONLY);
+        btn_fd = open_button_device(&dev_type);
         if (btn_fd >= 0) break;
         sleep(1);
     }
 
-    printf("[btn_thread] Button event listener active.\n");
+    printf("[btn_thread] Button event listener active (mode: %s).\n",
+           (dev_type == BTN_DEV_TYPE_EVDEV) ? "Linux evdev" : "Legacy char");
 
     while (1) {
         pthread_mutex_lock(&g_state_mutex);
@@ -237,7 +346,7 @@ static void *btn_thread_func(void *arg)
         pthread_mutex_unlock(&g_state_mutex);
         if (!is_running) break;
 
-        /* Poll button driver với timeout 500ms để không bị treo khi dừng chương trình */
+        /* Poll button driver with 500ms timeout for responsive shutdown */
         struct pollfd pfd;
         pfd.fd = btn_fd;
         pfd.events = POLLIN;
@@ -248,36 +357,58 @@ static void *btn_thread_func(void *arg)
             break;
         }
         if (pret == 0) {
-            continue; /* Timeout, kiểm tra lại cờ running */
-        }
-
-        ssize_t n = read(btn_fd, &ev, sizeof(struct button_event));
-        if (n != sizeof(struct button_event)) {
             continue;
         }
 
-        if (ev.state == BTN_STATE_PRESSED) {
-            press_timestamp_ns = ev.timestamp_ns;
-            continue;
-        }
-
-        if (ev.state == BTN_STATE_RELEASED && press_timestamp_ns > 0) {
-            uint64_t release_timestamp_ns = ev.timestamp_ns;
-            uint64_t duration_ms = (release_timestamp_ns - press_timestamp_ns) / 1000000ULL;
-            press_timestamp_ns = 0;
-
-            /* Đồng nhất nguồn thời gian debounce trực tiếp từ kernel interrupt timestamp */
-            uint64_t current_release_ms = release_timestamp_ns / 1000000ULL;
-
-            /* Lọc chống rung phần mềm (Software Debounce) */
-            if ((current_release_ms - last_release_time_ms) < BTN_SOFTWARE_DEBOUNCE_MS) {
-                printf("[btn_thread] Debounce: Ignored rapid click (<%dms)\n", BTN_SOFTWARE_DEBOUNCE_MS);
+        if (dev_type == BTN_DEV_TYPE_EVDEV) {
+            struct input_event ev;
+            ssize_t n = read(btn_fd, &ev, sizeof(struct input_event));
+            if (n != sizeof(struct input_event)) {
                 continue;
             }
-            last_release_time_ms = current_release_ms;
 
-            /* Xử lý hành động nút nhấn theo ma trận ưu tiên */
-            dispatch_button_action(duration_ms);
+            if (ev.type == EV_KEY) {
+                struct timespec ts_now;
+                clock_gettime(CLOCK_MONOTONIC, &ts_now);
+                uint64_t now_ms = (uint64_t)ts_now.tv_sec * 1000ULL + (uint64_t)ts_now.tv_nsec / 1000000ULL;
+
+                if (ev.value == 1) {
+                    press_timestamp_ms = now_ms;
+                } else if (ev.value == 0 && press_timestamp_ms > 0) {
+                    uint64_t duration_ms = (now_ms >= press_timestamp_ms) ? (now_ms - press_timestamp_ms) : 0;
+                    press_timestamp_ms = 0;
+
+                    if ((now_ms - last_release_time_ms) < BTN_SOFTWARE_DEBOUNCE_MS) {
+                        printf("[btn_thread] Debounce: Ignored rapid click (<%dms)\n", BTN_SOFTWARE_DEBOUNCE_MS);
+                        continue;
+                    }
+                    last_release_time_ms = now_ms;
+
+                    dispatch_button_action(duration_ms);
+                }
+            }
+        } else if (dev_type == BTN_DEV_TYPE_LEGACY_CHAR) {
+            struct button_event ev;
+            ssize_t n = read(btn_fd, &ev, sizeof(struct button_event));
+            if (n != sizeof(struct button_event)) {
+                continue;
+            }
+
+            if (ev.state == BTN_STATE_PRESSED) {
+                press_timestamp_ms = ev.timestamp_ns / 1000000ULL;
+            } else if (ev.state == BTN_STATE_RELEASED && press_timestamp_ms > 0) {
+                uint64_t release_ms = ev.timestamp_ns / 1000000ULL;
+                uint64_t duration_ms = (release_ms >= press_timestamp_ms) ? (release_ms - press_timestamp_ms) : 0;
+                press_timestamp_ms = 0;
+
+                if ((release_ms - last_release_time_ms) < BTN_SOFTWARE_DEBOUNCE_MS) {
+                    printf("[btn_thread] Debounce: Ignored rapid click (<%dms)\n", BTN_SOFTWARE_DEBOUNCE_MS);
+                    continue;
+                }
+                last_release_time_ms = release_ms;
+
+                dispatch_button_action(duration_ms);
+            }
         }
     }
 
@@ -325,6 +456,7 @@ int main(int argc, char *argv[])
     signal(SIGPIPE, SIG_IGN); /* Ignore SIGPIPE to avoid socket termination */
 
     system_state_init();
+    watchdog_init();
 
     if (ssd1306_init(I2C_DEV_PATH, 0x3C) < 0) {
         fprintf(stderr, "[main] Warning: SSD1306 OLED initialization failed at %s\n", I2C_DEV_PATH);
@@ -347,6 +479,7 @@ int main(int argc, char *argv[])
     pthread_join(s_buzzer_tid, NULL);
     pthread_join(s_smartconfig_tid, NULL);
 
+    watchdog_close();
     ssd1306_close();
     system_state_destroy();
 

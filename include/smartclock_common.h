@@ -23,9 +23,11 @@ struct button_event {
 };
 
 /* Device node paths */
-#define BTN_DEV_PATH      "/dev/btn_driver"
-#define BUZZER_DEV_PATH   "/dev/buzzer_driver"
-#define I2C_DEV_PATH      "/dev/i2c-1"
+#define BTN_DEV_PATH        "/dev/input/event0"
+#define BTN_FALLBACK_PATH   "/dev/btn_driver"
+#define BUZZER_DEV_PATH     "/dev/buzzer_driver"
+#define WATCHDOG_DEV_PATH   "/dev/watchdog"
+#define I2C_DEV_PATH        "/dev/i2c-1"
 
 /* Centralized Network & Server Constants */
 #define DEFAULT_HTTP_PORT           8080

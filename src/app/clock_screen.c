@@ -122,6 +122,9 @@ void *clock_thread_func(void *arg)
         ssize_t s = read(tfd, &expirations, sizeof(expirations));
         if (s != sizeof(expirations)) continue;
 
+        /* Hardware Watchdog Heartbeat: Ping watchdog every 1s to guarantee system liveness */
+        watchdog_keepalive();
+
         time_t now = time(NULL);
         struct tm tm_info;
         localtime_r(&now, &tm_info);
