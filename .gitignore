@@ -16,14 +16,6 @@ smartclock_debug
 !**/docs/debug_logs/*.log
 *.logog
 
-# Temporary files
-deploy_v1/
-deploy_v2/
-releases/
-*.tmp
-*~
-.DS_Store
-
 # AI Agent rules & configurations (Local IDE only)
 .agent
 .agents
