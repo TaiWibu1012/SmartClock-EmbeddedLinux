@@ -1,0 +1,582 @@
+/**
+ * @file weather_screen.c
+ * @brief [P2-M5] Weather Screen Controller & HTTP Client (Fetch on entry, 5-min refresh, 5s non-blocking timeout)
+ * @author PHUC TAI
+ */
+
+#include "weather_screen.h"
+#include "ssd1306_oled.h"
+#include "ssd1306_icons.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <netdb.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
+#define HTTP_BUF_SIZE 2048
+
+#define OPENMETEO_HOST  "api.open-meteo.com"
+#define OPENMETEO_PORT  443
+#define OPENMETEO_PATH  "/v1/forecast?latitude=10.8231&longitude=106.6297&current=temperature_2m,relative_humidity_2m,weather_code"
+
+/**
+ * @brief Retrieve local IP address assigned to a specific network interface
+ * @param ifname Network interface name (e.g., "wlan0", "lo")
+ * @param out_ip Destination buffer for IP string
+ * @param max_len Size of destination buffer
+ * @return true if IP was successfully retrieved, false otherwise
+ */
+static bool get_interface_ip(const char *ifname, char *out_ip, size_t max_len)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        fd = socket(AF_INET, SOCK_DGRAM, 0);
+    }
+    if (fd < 0) return false;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    ifr.ifr_addr.sa_family = AF_INET;
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+
+    if (ioctl(fd, SIOCGIFADDR, &ifr) < 0) {
+        close(fd);
+        return false;
+    }
+    close(fd);
+
+    struct sockaddr_in *ipaddr = (struct sockaddr_in *)&ifr.ifr_addr;
+    strncpy(out_ip, inet_ntoa(ipaddr->sin_addr), max_len - 1);
+    out_ip[max_len - 1] = '\0';
+    return true;
+}
+
+static const char *wmo_code_to_condition(int code)
+{
+    switch (code) {
+        case 0:
+            return "Clear Sky";
+        case 1:
+        case 2:
+            return "Partly Cloudy";
+        case 3:
+            return "Overcast";
+        case 45:
+        case 48:
+            return "Foggy";
+        case 51:
+        case 53:
+        case 55:
+            return "Drizzle";
+        case 61:
+        case 63:
+        case 65:
+            return "Rainy";
+        case 80:
+        case 81:
+        case 82:
+            return "Rain Showers";
+        case 71:
+        case 73:
+        case 75:
+            return "Snowy";
+        case 95:
+        case 96:
+        case 99:
+            return "Thunderstorm";
+        default:
+            return "Fair";
+    }
+}
+
+/**
+ * @brief Parse JSON weather response to extract temperature, humidity, and condition
+ * @param json_body String containing HTTP body payload
+ * @param out_data Destination struct for parsed weather data
+ * @return true if fields were parsed successfully, false otherwise
+ */
+static bool parse_weather_json(const char *json_body, weather_data_t *out_data)
+{
+    if (!json_body || !out_data) return false;
+
+    /* 1. Check for Open-Meteo API response structure */
+    const char *p_temp2m = strstr(json_body, "\"temperature_2m\":");
+    const char *p_hum = strstr(json_body, "\"relative_humidity_2m\":");
+    const char *p_wcode = strstr(json_body, "\"weather_code\":");
+
+    if (p_temp2m && p_wcode) {
+        out_data->temperature = (float)atof(p_temp2m + 17);
+        if (p_hum) {
+            out_data->humidity = atoi(p_hum + 23);
+        } else {
+            out_data->humidity = 0;
+        }
+        int code = atoi(p_wcode + 15);
+        strncpy(out_data->condition, wmo_code_to_condition(code), sizeof(out_data->condition) - 1);
+        out_data->condition[sizeof(out_data->condition) - 1] = '\0';
+        out_data->is_valid = true;
+        out_data->last_update_ts = (uint64_t)time(NULL);
+        return true;
+    }
+
+    /* 2. Fallback: Parse local mock server format */
+    const char *temp_pos = strstr(json_body, "\"temp\":");
+    const char *cond_pos = strstr(json_body, "\"condition\":");
+
+    if (!temp_pos || !cond_pos) return false;
+
+    temp_pos += strlen("\"temp\":");
+    while (*temp_pos == ' ' || *temp_pos == ':') temp_pos++;
+    out_data->temperature = (float)atof(temp_pos);
+
+    cond_pos += strlen("\"condition\":");
+    while (*cond_pos == ' ' || *cond_pos == '\"') cond_pos++;
+
+    int idx = 0;
+    while (*cond_pos != '\"' && *cond_pos != '}' && *cond_pos != '\0' && idx < 31) {
+        out_data->condition[idx++] = *cond_pos++;
+    }
+    out_data->condition[idx] = '\0';
+    out_data->humidity = 65; /* Default mock humidity */
+    out_data->is_valid = true;
+    out_data->last_update_ts = (uint64_t)time(NULL);
+
+    return true;
+}
+
+/**
+ * @brief Fetch weather information from Mock Weather Server via non-blocking TCP HTTP GET
+ * @param out_data Destination struct for retrieved weather information
+ * @return true on success, false on network error or timeout
+ */
+static bool fetch_http_weather_single(weather_data_t *out_data, bool *out_timed_out)
+{
+    int sock_fd = -1;
+    struct sockaddr_in server_addr;
+    struct timeval tv_timeout;
+    char request[256];
+    char response[HTTP_BUF_SIZE];
+    bool success = false;
+
+    if (out_timed_out) *out_timed_out = false;
+
+    sock_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (sock_fd < 0) {
+        sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    }
+    if (sock_fd < 0) {
+        perror("weather_screen: Failed to create socket");
+        goto cleanup;
+    }
+    fcntl(sock_fd, F_SETFD, FD_CLOEXEC);
+
+    /* Đưa socket về chế độ Non-blocking để kiểm soát chặt timeout connect() */
+    int flags = fcntl(sock_fd, F_GETFL, 0);
+    fcntl(sock_fd, F_SETFL, flags | O_NONBLOCK);
+
+    tv_timeout.tv_sec = WEATHER_TIMEOUT_SEC;
+    tv_timeout.tv_usec = 0;
+    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv_timeout, sizeof(tv_timeout));
+    setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv_timeout, sizeof(tv_timeout));
+
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(WEATHER_SERVER_PORT);
+
+    if (inet_pton(AF_INET, WEATHER_SERVER_IP, &server_addr.sin_addr) <= 0) {
+        perror("weather_screen: Invalid server IP");
+        goto cleanup;
+    }
+
+    int res = connect(sock_fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
+    if (res < 0) {
+        if (errno == EINPROGRESS) {
+            struct pollfd pfd;
+            pfd.fd = sock_fd;
+            pfd.events = POLLOUT;
+            int poll_ret;
+
+            /* Retry poll() if interrupted by system signal (EINTR) */
+            do {
+                poll_ret = poll(&pfd, 1, WEATHER_TIMEOUT_SEC * 1000);
+            } while (poll_ret < 0 && errno == EINTR);
+
+            if (poll_ret <= 0) {
+                if (out_timed_out) *out_timed_out = true;
+                printf("weather_screen: Connect timed out (%ds)\n", WEATHER_TIMEOUT_SEC);
+                goto cleanup;
+            }
+
+            int sock_err = 0;
+            socklen_t err_len = sizeof(sock_err);
+            if (getsockopt(sock_fd, SOL_SOCKET, SO_ERROR, &sock_err, &err_len) < 0 || sock_err != 0) {
+                printf("weather_screen: Connect error: %s\n", strerror(sock_err ? sock_err : errno));
+                goto cleanup;
+            }
+        } else {
+            perror("weather_screen: Connect failed immediately");
+            goto cleanup;
+        }
+    }
+
+    /* Khôi phục blocking mode với SO_RCVTIMEO cho các lệnh send/recv */
+    fcntl(sock_fd, F_SETFL, flags);
+
+    snprintf(request, sizeof(request),
+             "GET %s HTTP/1.1\r\n"
+             "Host: %s:%d\r\n"
+             "User-Agent: SmartClock/1.0\r\n"
+             "Connection: close\r\n\r\n",
+             WEATHER_REQUEST_PATH, WEATHER_SERVER_IP, WEATHER_SERVER_PORT);
+
+    if (send(sock_fd, request, strlen(request), MSG_NOSIGNAL) < 0) {
+        perror("weather_screen: Send failed");
+        goto cleanup;
+    }
+
+    memset(response, 0, sizeof(response));
+    ssize_t bytes_read = recv(sock_fd, response, sizeof(response) - 1, 0);
+    if (bytes_read > 0) {
+        response[bytes_read] = '\0';
+        char *body = strstr(response, "\r\n\r\n");
+        if (body) {
+            body += 4;
+            if (parse_weather_json(body, out_data)) {
+                success = true;
+            }
+        }
+    }
+
+cleanup:
+    /* Guaranteed Resource Management: single exit cleanup point */
+    if (sock_fd >= 0) {
+        close(sock_fd);
+        sock_fd = -1;
+    }
+    return success;
+}
+
+static bool fetch_openmeteo_https(weather_data_t *out_data, bool *out_timed_out)
+{
+    if (out_timed_out) *out_timed_out = false;
+    struct hostent *he = gethostbyname(OPENMETEO_HOST);
+    if (!he) {
+        printf("[weather_thread] DNS resolution failed for %s\n", OPENMETEO_HOST);
+        return false;
+    }
+
+    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd < 0) return false;
+
+    /* Set non-blocking mode for connection timeout */
+    int flags = fcntl(sock_fd, F_GETFL, 0);
+    fcntl(sock_fd, F_SETFL, flags | O_NONBLOCK);
+
+    struct sockaddr_in saddr;
+    memset(&saddr, 0, sizeof(saddr));
+    saddr.sin_family = AF_INET;
+    saddr.sin_port = htons(OPENMETEO_PORT);
+    memcpy(&saddr.sin_addr.s_addr, he->h_addr_list[0], he->h_length);
+
+    int res = connect(sock_fd, (struct sockaddr *)&saddr, sizeof(saddr));
+    if (res < 0) {
+        if (errno == EINPROGRESS) {
+            struct pollfd pfd;
+            pfd.fd = sock_fd;
+            pfd.events = POLLOUT;
+            int pret = poll(&pfd, 1, WEATHER_TIMEOUT_SEC * 1000);
+            if (pret <= 0) {
+                if (out_timed_out) *out_timed_out = true;
+                close(sock_fd);
+                return false;
+            }
+            int err = 0;
+            socklen_t elen = sizeof(err);
+            if (getsockopt(sock_fd, SOL_SOCKET, SO_ERROR, &err, &elen) < 0 || err != 0) {
+                close(sock_fd);
+                return false;
+            }
+        } else {
+            close(sock_fd);
+            return false;
+        }
+    }
+
+    /* Set socket back to blocking with timeouts for TLS */
+    fcntl(sock_fd, F_SETFL, flags);
+    struct timeval tv = { .tv_sec = WEATHER_TIMEOUT_SEC, .tv_usec = 0 };
+    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    const SSL_METHOD *method = TLS_client_method();
+    SSL_CTX *ctx = SSL_CTX_new(method);
+    if (!ctx) {
+        close(sock_fd);
+        return false;
+    }
+
+    SSL *ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, sock_fd);
+    SSL_set_tlsext_host_name(ssl, OPENMETEO_HOST);
+
+    bool ok = false;
+    if (SSL_connect(ssl) > 0) {
+        char req[512];
+        snprintf(req, sizeof(req),
+                 "GET %s HTTP/1.1\r\n"
+                 "Host: %s\r\n"
+                 "User-Agent: SmartClock/2.0 (Embedded Linux; RPi Zero 2W)\r\n"
+                 "Accept: application/json\r\n"
+                 "Connection: close\r\n\r\n",
+                 OPENMETEO_PATH, OPENMETEO_HOST);
+
+        SSL_write(ssl, req, strlen(req));
+
+        char resp[4096];
+        int total = 0, n;
+        while ((n = SSL_read(ssl, resp + total, sizeof(resp) - 1 - total)) > 0) {
+            total += n;
+            if (total >= (int)sizeof(resp) - 1) break;
+        }
+        resp[total] = '\0';
+
+        char *body = strstr(resp, "\r\n\r\n");
+        if (body) {
+            body += 4;
+            ok = parse_weather_json(body, out_data);
+        }
+        SSL_shutdown(ssl);
+    }
+
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
+    close(sock_fd);
+    return ok;
+}
+
+static bool fetch_http_weather(weather_data_t *out_data)
+{
+    pthread_mutex_lock(&g_state_mutex);
+    net_mode_t cur_net = g_system_state.net_mode;
+    pthread_mutex_unlock(&g_state_mutex);
+
+    bool is_timeout = false;
+
+    /* 1. Try Real Cloud Open-Meteo HTTPS if in Station mode */
+    if (cur_net == MODE_STATION) {
+        printf("[weather_thread] Querying Live Open-Meteo HTTPS API (%s)...\n", OPENMETEO_HOST);
+        if (fetch_openmeteo_https(out_data, &is_timeout)) {
+            printf("[weather_thread] Live weather fetched: %.1f C, %d%% humidity, %s\n",
+                   out_data->temperature, out_data->humidity, out_data->condition);
+            return true;
+        }
+        printf("[weather_thread] Open-Meteo query failed. Falling back to local mock server...\n");
+    }
+
+    /* 2. Fallback to local mock server */
+    int attempt = 0;
+    while (attempt < 3) {
+        attempt++;
+        is_timeout = false;
+        if (fetch_http_weather_single(out_data, &is_timeout)) {
+            return true;
+        }
+        if (is_timeout) {
+            break;
+        }
+
+        pthread_mutex_lock(&g_state_mutex);
+        bool running = g_system_state.running;
+        pthread_mutex_unlock(&g_state_mutex);
+        if (!running) break;
+
+        if (attempt < 3) {
+            usleep(300 * 1000);
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Render Weather UI to OLED Display (Called strictly by clock_thread / Master Arbitrator)
+ * @param data Current weather metrics
+ * @param net_mode Active network mode (Station / Soft AP)
+ */
+void render_weather_ui(const weather_data_t *data, net_mode_t net_mode)
+{
+    char temp_str[16];
+    char ip_str[24] = "No IP";
+    char footer_str[32];
+
+    ssd1306_clear();
+
+    /* 1. Fetch IP Address */
+    if (net_mode == MODE_SOFT_AP) {
+        strncpy(ip_str, "192.168.4.1", sizeof(ip_str));
+    } else {
+        if (!get_interface_ip("wlan0", ip_str, sizeof(ip_str))) {
+            strncpy(ip_str, "No IP", sizeof(ip_str));
+        }
+    }
+
+    /* =========================================================================
+     * 1. HEADER BAR (Y: 0 -> 10)
+     * ========================================================================= */
+    if (net_mode == MODE_SOFT_AP) {
+        ssd1306_draw_bitmap(2, 1, g_icon_softap, 8, 8, 1);
+        ssd1306_draw_string(14, 1, "AP WEATHER", 1);
+    } else if (net_mode == MODE_TRANSITIONING) {
+        ssd1306_draw_bitmap(2, 1, g_icon_wifi_low, 8, 8, 1);
+        ssd1306_draw_string(14, 1, "CONNECTING..", 1);
+    } else {
+        ssd1306_draw_bitmap(2, 1, g_icon_wifi_full, 8, 8, 1);
+        ssd1306_draw_string(14, 1, "STA WEATHER", 1);
+    }
+
+    if (data->is_valid) {
+        ssd1306_draw_string(98, 1, "[LIVE]", 1);
+    } else {
+        ssd1306_draw_string(98, 1, "[OFF]", 1);
+    }
+
+    ssd1306_draw_hline(0, 10, SSD1306_WIDTH, 1);
+
+    /* =========================================================================
+     * 2. MAIN CENTER BODY (Y: 11 -> 48)
+     * ========================================================================= */
+    if (data->is_valid) {
+        /* Weather Icon (16x16) based on condition keyword */
+        if (strstr(data->condition, "Rain") != NULL || strstr(data->condition, "Drizzle") != NULL) {
+            ssd1306_draw_bitmap(10, 20, g_icon_rain_16x16, 16, 16, 1);
+        } else if (strstr(data->condition, "Cloud") != NULL || strstr(data->condition, "Overcast") != NULL) {
+            ssd1306_draw_bitmap(10, 20, g_icon_cloud_16x16, 16, 16, 1);
+        } else {
+            ssd1306_draw_bitmap(10, 20, g_icon_sun_16x16, 16, 16, 1);
+        }
+
+        /* Large Temperature next to icon */
+        snprintf(temp_str, sizeof(temp_str), "%.1f C", data->temperature);
+        ssd1306_draw_string(34, 16, temp_str, 2);
+
+        /* Weather Condition string */
+        ssd1306_draw_string(34, 35, data->condition, 1);
+
+        /* Humidity with droplet icon if available */
+        if (data->humidity > 0) {
+            char hum_str[16];
+            ssd1306_draw_bitmap(88, 35, g_icon_drop, 8, 8, 1);
+            snprintf(hum_str, sizeof(hum_str), "%d%%", data->humidity);
+            ssd1306_draw_string(98, 35, hum_str, 1);
+        }
+    } else {
+        ssd1306_draw_bitmap(8, 22, g_icon_wifi_none, 8, 8, 1);
+        ssd1306_draw_string(22, 20, "NO WEATHER DATA", 1);
+        ssd1306_draw_string(22, 34, "Checking network...", 1);
+    }
+
+    /* =========================================================================
+     * 3. FOOTER BAR (Y: 49 -> 63)
+     * ========================================================================= */
+    ssd1306_draw_hline(0, 49, SSD1306_WIDTH, 1);
+
+    if (strcmp(ip_str, "No IP") != 0) {
+        snprintf(footer_str, sizeof(footer_str), "IP: %s:%d", ip_str, DEFAULT_HTTP_PORT);
+    } else {
+        snprintf(footer_str, sizeof(footer_str), "Status: Disconnected");
+    }
+
+    int footer_len = strlen(footer_str);
+    int footer_x = (SSD1306_WIDTH - (footer_len * 6)) / 2;
+    if (footer_x < 1) footer_x = 1;
+
+    ssd1306_draw_string(footer_x, 53, footer_str, 1);
+
+    ssd1306_update();
+}
+
+
+void *weather_thread_func(void *arg)
+{
+    (void)arg;
+    time_t last_fetch_time = 0;
+    weather_data_t fetched_data;
+    memset(&fetched_data, 0, sizeof(fetched_data));
+
+    printf("[weather_thread] Worker thread started.\n");
+
+    while (1) {
+        pthread_mutex_lock(&g_state_mutex);
+
+        /* Wait until running is false OR we are in SCREEN_WEATHER OR force_weather_fetch is requested */
+        while (g_system_state.running && 
+               g_system_state.current_screen != SCREEN_WEATHER && 
+               !g_system_state.force_weather_fetch) {
+            pthread_cond_wait(&g_state_cond, &g_state_mutex);
+        }
+
+        if (!g_system_state.running) {
+            pthread_mutex_unlock(&g_state_mutex);
+            break;
+        }
+
+        bool force_fetch = g_system_state.force_weather_fetch;
+        if (force_fetch) {
+            g_system_state.force_weather_fetch = false;
+        }
+
+        time_t now = time(NULL);
+        bool need_fetch = false;
+        if (g_system_state.current_screen == SCREEN_WEATHER) {
+            if (force_fetch || (last_fetch_time == 0) || (now - last_fetch_time >= WEATHER_REFRESH_SEC)) {
+                need_fetch = true;
+            }
+        }
+        pthread_mutex_unlock(&g_state_mutex);
+
+        if (need_fetch) {
+            printf("[weather_thread] Querying Mock Weather Server...\n");
+            last_fetch_time = time(NULL);
+
+            bool ok = fetch_http_weather(&fetched_data);
+
+            pthread_mutex_lock(&g_state_mutex);
+            if (ok) {
+                g_system_state.weather_data = fetched_data;
+                g_system_state.weather_data.last_update_ts = (uint64_t)last_fetch_time;
+                printf("[weather_thread] Data updated: %.1f C, %s\n",
+                       fetched_data.temperature, fetched_data.condition);
+            } else {
+                g_system_state.weather_data.is_valid = false;
+                printf("[weather_thread] Fetch failed. Marked as Offline.\n");
+            }
+            pthread_mutex_unlock(&g_state_mutex);
+        }
+
+        /* Wait for next 5-minute refresh cycle or user event (screen toggle / shutdown) */
+        pthread_mutex_lock(&g_state_mutex);
+        if (g_system_state.running && g_system_state.current_screen == SCREEN_WEATHER && !g_system_state.force_weather_fetch) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += WEATHER_REFRESH_SEC;
+            pthread_cond_timedwait(&g_state_cond, &g_state_mutex, &ts);
+        }
+        pthread_mutex_unlock(&g_state_mutex);
+    }
+
+    printf("[weather_thread] Thread safely terminated.\n");
+    return NULL;
+}
