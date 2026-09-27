@@ -1,8 +1,8 @@
-# TEST REPORT — Project 2: Smart Weather Alarm Clock — Học viên: Lê Phúc Tài
+# TEST REPORT — Smart Weather Alarm Clock v1.0
 
-> **Học viên:** Lê Phúc Tài | **Lớp:** DevLinux Embedded Linux K26.1  
+> **Tác giả:** Lê Phúc Tài  
 > **Ngày chạy test:** 24/08/2026  
-> **Môi trường chạy test:** Raspberry Pi Zero W / Zero 2W (Yocto core-image-minimal) + Ubuntu 22.04 VM  
+> **Môi trường chạy test:** Raspberry Pi Zero 2W (Yocto core-image-minimal 32-bit ARMv7) + Ubuntu 22.04 VM  
 
 ---
 
@@ -417,5 +417,5 @@ Không có. Toàn bộ các yêu cầu Must-have (P2-M1 đến P2-M9) và các t
 **Số case Pass:** 11 / 11 (100%)
 
 ```text
-Hệ thống Smart Weather Alarm Clock hoạt động ổn định trên phần cứng Raspberry Pi Zero W, đáp ứng trọn vẹn các yêu cầu về Driver Kernel, Device Tree Overlay, Đồng bộ đa luồng POSIX, Webserver cấu hình và Kiểm thử an toàn bộ nhớ. Helgrind xác nhận 0 Data Race, Valgrind xác nhận 0 Memory Leak, Strace xác nhận timer, socket và file descriptor management hoạt động đúng thiết kế.
+Hệ thống Smart Weather Alarm Clock hoạt động ổn định trên phần cứng Raspberry Pi Zero 2W, đáp ứng trọn vẹn các yêu cầu về Driver Kernel, Device Tree Overlay, Đồng bộ đa luồng POSIX, Webserver cấu hình và Kiểm thử an toàn bộ nhớ. Helgrind xác nhận 0 Data Race, Valgrind xác nhận 0 Memory Leak, Strace xác nhận timer, socket và file descriptor management hoạt động đúng thiết kế.
 ```

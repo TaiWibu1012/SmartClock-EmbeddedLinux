@@ -1,5 +1,5 @@
-# DEMO LINKS & TIMESTAMPS — Project 2: Smart Weather Alarm Clock
-# Học viên: Lê Phúc Tài | Lớp: DevLinux Embedded Linux K26.1
+# DEMO LINKS & TIMESTAMPS — Smart Weather Alarm Clock v1.0
+# Tác giả: Lê Phúc Tài
 # Thiết bị thực thi: Raspberry Pi Zero 2W
 
 # Link Video Demo (Google Drive):
