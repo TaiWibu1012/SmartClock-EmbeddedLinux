@@ -9,7 +9,7 @@ APP_DIR    = app
 
 all: driver app
 	@echo "=================================================="
-	@echo "  PROJECT 2 BUILD COMPLETED SUCCESSFULLY"
+	@echo "  SMART CLOCK V1 BUILD COMPLETED SUCCESSFULLY"
 	@echo "=================================================="
 
 debug:

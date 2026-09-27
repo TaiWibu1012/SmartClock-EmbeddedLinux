@@ -17,6 +17,7 @@ smartclock_debug
 *.logog
 
 # Temporary files
+deploy_v1/
 deploy_v2/
 releases/
 *.tmp
