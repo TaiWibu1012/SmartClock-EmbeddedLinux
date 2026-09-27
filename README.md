@@ -1,49 +1,56 @@
-# SMART WEATHER ALARM CLOCK
+# SMART WEATHER ALARM CLOCK — v2.0
 
 > **Tác giả:** Lê Phúc Tài  
+> **Phiên bản:** v2.0 (Industrial IoT & Linux Subsystem Architecture)  
 > **Phần cứng mục tiêu:** Raspberry Pi Zero 2W (Broadcom BCM2837 SoC, Quad-Core ARM Cortex-A53 @ 1.0 GHz, 512 MB LPDDR2)  
 > **Hệ điều hành:** Custom Embedded Linux (Yocto Project Poky 5.0 LTS Scarthgap, Linux Kernel 6.6.63 LTS, 32-bit ARMv7-A)  
 
 ---
 
-## 1. Giới thiệu Dự án
+## 1. Giới thiệu Kiến trúc Phiên bản v2.0
 
-**Smart Weather Alarm Clock** là một thiết bị đồng hồ thông minh kiêm trạm thông tin thời tiết nhúng (IoT Edge Device) được phát triển hoàn chỉnh từ tầng hệ điều hành đến ứng dụng người dùng trên phần cứng **Raspberry Pi Zero 2W**. Dự án kết hợp chặt chẽ giữa lập trình nhân Linux (Linux Kernel Space: Device Tree, Interrupt Handling, PWM hrtimer, Input Subsystem) và lập trình hệ thống đa luồng (User Space: POSIX Threads, Non-blocking I/O, Dirty-Page Graphics, OpenSSL HTTPS, MQTT-C).
+**Smart Weather Alarm Clock v2.0** là phiên bản nâng cấp toàn diện hướng tới chuẩn thiết bị công nghiệp (Industrial IoT Edge Device). Phiên bản này tập trung vào tính tin cậy cao, chuẩn hóa giao tiếp phần cứng thông qua các subsystem chính thức của Linux kernel, tối ưu hóa băng thông I2C bus và mở rộng kết nối đám mây (Cloud IoT) hai chiều:
 
-Dự án được phân chia theo hai mốc kiến trúc rõ ràng:
-
-* **Phiên bản v1.0 (Foundation Architecture):**
-  * Kiến trúc driver truyền thống theo chuẩn **Character Device Drivers** (`/dev/btn_driver`, `/dev/buzzer_driver`).
-  * Ứng dụng điều phối đa luồng (POSIX Threads) quản lý: cập nhật đồng hồ qua `timerfd`, đồng bộ thời gian thực qua giao thức SNTP, kích hoạt chuông báo thức với kỹ thuật Atomic Write lưu cấu hình bền vững vào Flash.
-  * Tích hợp máy chủ HTTP Web Server nhúng (Port 8080) và cơ chế chuyển đổi mạng Soft AP $\leftrightarrow$ Station phục vụ cấu hình Wi-Fi và giờ báo thức trực tiếp từ trình duyệt điện thoại/máy tính.
-
-* **Phiên bản v2.0 (Industrial IoT & Subsystem Architecture):**
-  * **Chuẩn hóa driver nút nhấn qua Input Subsystem (`evdev`):** Chuyển từ character device tự chế sang `struct input_dev`, sinh mã sự kiện chuẩn Linux `EV_KEY` (`KEY_POWER`) qua `/dev/input/event*`. Ứng dụng người dùng đọc sự kiện qua API input chuẩn.
-  * **Giám sát thông số driver qua Sysfs:** Tạo 2 node `/sys/devices/platform/.../press_count` (đếm số lần nhấn) và `debounce_drops` (số ngắt rung được lọc) giúp debug và giám sát phần cứng từ command-line.
-  * **Bảo vệ hệ thống bằng Hardware Watchdog (`/dev/watchdog`):** Tích hợp trực tiếp bộ đếm Watchdog phần cứng của chip BCM2835 với chu kỳ 15 giây. Luồng chính ping định kỳ 1 giây; nếu xảy ra lỗi treo luồng hoặc deadlock quá 15 giây, chip sẽ tự động reset. Khi ứng dụng tắt an toàn, chương trình gửi ký tự `'V'` (magic close) để giải phóng watchdog.
-  * **Tối ưu hiển thị OLED SSD1306 qua cơ chế Dirty-Page:** Sử dụng shadow buffer để so sánh từng page trước khi đẩy qua bus I2C. Những page không đổi (ví dụ khi chỉ có chữ số giây nhấp nháy) sẽ được bỏ qua, giúp giảm từ 75% đến 90% lưu lượng chiếm dụng trên bus I2C.
-  * **Nguyên ngữ đồ họa 2D số nguyên & Bộ icon Bitmap:** Thuật toán Bresenham vẽ đường thẳng và đường tròn hoàn toàn bằng phép toán số nguyên (không dùng số thực `float`), kết hợp bộ icon bitmap 1-bit tùy biến (cột sóng Wi-Fi, trạng thái Soft AP, chuông báo thức, mây, mưa, nắng).
-  * **Thời tiết thực tế qua HTTPS (Open-Meteo API):** Sử dụng OpenSSL thiết lập kết nối mã hóa HTTPS tới `api.open-meteo.com` (miễn phí, không cần API key), tự giải mã JSON lấy nhiệt độ, độ ẩm và mã thời tiết WMO. Tích hợp cơ chế tự động chuyển sang server giả lập nội bộ (mock server) khi mất kết nối mạng.
-  * **Giám sát & Điều khiển từ xa qua MQTT (MQTT-C):** Tích hợp thư viện MQTT-C siêu nhẹ (~15 KB), kết nối tới broker đám mây HiveMQ:
-    * **Telemetry (Publish):** Định kỳ 30 giây gửi dữ liệu trạng thái (nhiệt độ, độ ẩm, giờ báo thức, màn hình đang hiển thị, uptime) lên topic `smartclock/tai/telemetry`.
-    * **Command (Subscribe):** Nhận lệnh từ xa qua topic `smartclock/tai/command` để tắt chuông, chỉnh giờ báo thức hoặc chuyển màn hình.
+1. **Chuẩn hóa Driver Nút nhấn qua Linux Input Subsystem (`evdev`):**
+   * Driver nút bấm (`btn_driver.c`) sử dụng `struct input_dev`, sinh mã sự kiện chuẩn Linux `EV_KEY` (`KEY_POWER`) truyền qua node `/dev/input/event*`.
+   * Ứng dụng không gian người dùng đọc sự kiện bằng API input chuẩn (`struct input_event`), giúp tách biệt hoàn toàn logic phần cứng khỏi ứng dụng.
+2. **Theo dõi thông số Driver qua Sysfs (`sysfs telemetry`):**
+   * Cung cấp 2 node `/sys/devices/platform/smartclock_button/press_count` (đếm số lần nhấn) và `debounce_drops` (số ngắt rung được lọc). Giúp kỹ sư kiểm tra trạng thái hoạt động của phím trực tiếp từ dòng lệnh mà không cần debug log.
+3. **Bảo vệ Hệ thống bằng Hardware Watchdog (`/dev/watchdog`):**
+   * Kích hoạt watchdog phần cứng của chip Broadcom BCM2835 với chu kỳ timeout 15 giây.
+   * Luồng chính của ứng dụng ping heartbeat mỗi 1 giây; nếu xảy ra lỗi treo luồng hoặc deadlock quá 15 giây, chip sẽ tự động reset phần cứng.
+   * Cơ chế tắt an toàn: Khi nhận tín hiệu dừng (`SIGINT`/`SIGTERM`), ứng dụng gửi ký tự `'V'` (magic close) để tắt watchdog mà không gây reboot ngoài ý muốn.
+4. **Tối ưu truyền dữ liệu OLED qua cơ chế Dirty-Page:**
+   * Màn hình OLED SSD1306 được quản lý thông qua buffer bóng (shadow buffer). Ứng dụng so sánh từng page (8 pixel chiều cao) trước khi gửi qua bus I2C.
+   * Những page không có thay đổi (ví dụ khi chỉ có chữ số giây nhấp nháy ở giữa màn hình) sẽ được bỏ qua, giúp giảm từ 75% đến 90% lưu lượng chiếm dụng trên bus I2C, giải phóng băng thông cho các tác vụ khác.
+5. **Vẽ icon Bitmap và Nguyên ngữ Đồ họa 2D bằng Số nguyên:**
+   * Tích hợp thuật toán Bresenham vẽ đường thẳng và đường tròn hoàn toàn bằng phép toán số nguyên (integer-only arithmetic, không dùng `float`), tối ưu hóa tốc độ xử lý trên CPU nhúng.
+   * Bộ icon bitmap 1-bit tùy biến hiển thị trạng thái kết nối Wi-Fi, Soft AP, chuông báo thức và các biểu tượng thời tiết (nắng, mây, mưa).
+6. **Lấy Dữ liệu Thời tiết Thực tế qua HTTPS (Open-Meteo REST API):**
+   * Sử dụng thư viện OpenSSL thiết lập kết nối mã hóa HTTPS tới `api.open-meteo.com` (miễn phí, không cần API key).
+   * Tự động giải mã JSON lấy nhiệt độ, độ ẩm và ánh xạ mã WMO sang biểu tượng thời tiết trực quan.
+   * Tích hợp non-blocking socket với timeout 5 giây và cơ chế tự động chuyển sang server giả lập nội bộ (mock server) khi mất mạng internet.
+7. **Giám sát & Điều khiển từ xa qua MQTT (MQTT-C):**
+   * Tích hợp thư viện MQTT-C siêu gọn nhẹ (~15 KB footprint), kết nối tới public broker HiveMQ (`broker.hivemq.com:1883`).
+   * **Gửi dữ liệu (Publish):** Định kỳ 30 giây gửi gói tin JSON telemetry chứa nhiệt độ, độ ẩm, giờ báo thức, màn hình hiện tại và uptime lên topic `smartclock/tai/telemetry`.
+   * **Nhận lệnh (Subscribe):** Lắng nghe lệnh từ topic `smartclock/tai/command` để tắt còi báo thức, cập nhật giờ hẹn giờ hoặc chuyển màn hình từ xa.
 
 ---
 
 ## 2. Kiến trúc Hệ điều hành Yocto Linux (Custom Embedded OS)
 
-Hệ điều hành chạy trên Raspberry Pi Zero 2W được xây dựng tùy biến hoàn toàn bằng **Yocto Project** nhằm tối ưu dung lượng, loại bỏ các dịch vụ không cần thiết và đảm bảo tính thời gian thực cho ứng dụng nhúng:
+Hệ điều hành nhúng chạy trên Raspberry Pi Zero 2W được xây dựng tùy biến hoàn toàn bằng **Yocto Project (Poky 5.0 LTS Scarthgap)**:
 
 * **Kiến trúc CPU:** **ARM 32-bit (ARMv7-A / armv7l)**  
   *(Cấu hình `MACHINE = "raspberrypi0-2w"`, tối ưu theo `cortexa7thf-neon-vfpv4`, nhân Linux được biên dịch dạng `zImage` 32-bit).*
 * **Bản phân phối (Distribution):** Poky Scarthgap 5.0 LTS.
 * **Linux Kernel:** Phiên bản 6.6.63 LTS.
 * **Các Meta Layers được sử dụng (`bblayers.conf`):**
-  1. `meta`: Core metadata từ OpenEmbedded, cung cấp cross-toolchain, thư viện glibc, busybox và các gói hệ thống cốt lõi.
-  2. `meta-poky`: Cấu hình bản phân phối và chính sách tham chiếu của Yocto Project.
-  3. `meta-yocto-bsp`: Các Board Support Package tham chiếu tiêu chuẩn.
+  1. `meta`: Core metadata từ OpenEmbedded, cung cấp cross-toolchain (GCC, Binutils, Glibc), busybox và cấu trúc hệ thống tệp cốt lõi.
+  2. `meta-poky`: Cấu hình chính sách và bản phân phối Poky tham chiếu của Yocto Project.
+  3. `meta-yocto-bsp`: Các Board Support Package tham chiếu tiêu chuẩn của Yocto Project.
   4. `meta-raspberrypi`: BSP chính thức cho phần cứng Raspberry Pi (chứa firmware GPU Broadcom VideoCore, kernel Pi Zero 2W, Device Tree và driver Wi-Fi/Bluetooth).
-  5. `meta-openembedded/meta-oe`: Layer mở rộng cung cấp các công cụ mạng, thư viện và tiện ích dòng lệnh (htop, ifconfig, netstat).
+  5. `meta-openembedded/meta-oe`: Layer mở rộng cung cấp các công cụ mạng, thư viện và tiện ích dòng lệnh (`htop`, `net-tools`,...).
 * **Các gói phần mềm tích hợp sẵn (`IMAGE_INSTALL`):**
   * `dropbear`: Máy chủ SSH siêu nhẹ (hoạt động mặc định tại cổng 22).
   * `wpa_supplicant`, `iw`, `wireless-regdb-static`: Bộ công cụ quản lý và kết nối mạng Wi-Fi.
@@ -61,7 +68,7 @@ Hệ điều hành chạy trên Raspberry Pi Zero 2W được xây dựng tùy b
 
 | Thiết bị Ngoại vi | Chân SoC (BCM) | Chân Header (Physical Pin) | Chế độ Hoạt động / Giao thức | Chức năng |
 |---|---|---|---|---|
-| **Nút nhấn (Button)** | `GPIO 17` | Pin 11 | Input, Active-Low, Internal Pull-Up, Dual-Edge IRQ | Nút bấm đa chức năng theo ngữ cảnh |
+| **Nút nhấn (Button)** | `GPIO 17` | Pin 11 | Input, Active-Low, Internal Pull-Up, Dual-Edge IRQ | Input Event `KEY_POWER` qua `/dev/input/event*` |
 | **Còi Buzzer** | `GPIO 27` | Pin 13 | Output, Active-High, PWM/hrtimer 2000 Hz | Phát âm thanh chuông báo thức |
 | **OLED SSD1306 SDA** | `GPIO 2` | Pin 3 | I2C-1 Data (`/dev/i2c-1`, Address `0x3C`) | Kênh truyền dữ liệu màn hình hiển thị |
 | **OLED SSD1306 SCL** | `GPIO 3` | Pin 5 | I2C-1 Clock (`/dev/i2c-1`, Address `0x3C`) | Kênh xung nhịp I2C màn hình hiển thị |
@@ -72,11 +79,11 @@ Hệ điều hành chạy trên Raspberry Pi Zero 2W được xây dựng tùy b
 
 ---
 
-## 4. Cấu trúc Thư mục Dự án
+## 4. Cấu trúc Thư mục Phiên bản v2.0
 
 ```text
 SmartClock/
-├── README.md                          # Tài liệu kỹ thuật, sơ đồ chân, kiến trúc và hướng dẫn vận hành
+├── README.md                          # Hướng dẫn kỹ thuật và vận hành cho phiên bản v2.0
 ├── OS/                                # Thư mục chứa file ảnh hệ điều hành Yocto nhúng
 │   ├── README.md                      # Chi tiết cấu hình bản build Yocto và hướng dẫn nạp thẻ nhớ
 │   ├── core-image-minimal-*.wic.bz2   # File ảnh đĩa bootable hoàn chỉnh (55 MB)
@@ -85,23 +92,16 @@ SmartClock/
 ├── devicetree/
 │   ├── smartclock-overlay.dts         # Source Device Tree Overlay (GPIO 17, 27, I2C-1)
 │   └── smartclock-overlay.dtbo        # Binary Device Tree Blob đã biên dịch
-├── docs/
-│   ├── test_report.md                 # Báo cáo kết quả kiểm thử & phân tích hiệu năng
-│   └── debug_logs/
-│       ├── helgrind.log               # Log kiểm thử chống race-condition đa luồng
-│       ├── valgrind.log               # Log kiểm thử rò rỉ bộ nhớ (Zero Leaks)
-│       ├── strace.log                 # Log theo dõi syscalls
-│       └── gdb.log                    # Log kiểm thử backtrace worker threads
 ├── include/
 │   └── smartclock_common.h            # Header định nghĩa dùng chung Kernel & Userspace
 ├── src/
 │   ├── Makefile                       # Top-level Makefile biên dịch toàn bộ dự án
 │   ├── driver/
 │   │   ├── Makefile                   # Kbuild Makefile cho Kernel Modules
-│   │   ├── btn_driver.c               # Driver nút nhấn (v1: Character Driver / v2: Input Subsystem)
+│   │   ├── btn_driver.c               # Driver nút nhấn chuẩn Linux Input Subsystem (evdev)
 │   │   └── buzzer_driver.c            # Driver còi buzzer PWM hrtimer 2 kHz
 │   └── app/
-│       ├── Makefile                   # Makefile biên dịch ứng dụng Userspace
+│       ├── Makefile                   # Makefile biên dịch ứng dụng Userspace (OpenSSL, Pthread)
 │       ├── main.c                     # Khởi tạo hệ thống, hardware watchdog, điều phối luồng
 │       ├── system_state.h             # Cấu trúc Shared State & Mutex boundary an toàn
 │       ├── clock_screen.c/.h          # Màn hình đồng hồ (chạy timerfd 1 giây đều đặn)
@@ -121,11 +121,11 @@ SmartClock/
 
 ## 5. Ma trận Xử lý Nút nhấn theo Ngữ cảnh (Button Priority Matrix)
 
-Nút nhấn vật lý (GPIO 17) được quản lý tập trung và phân loại sự kiện nguyên tử dưới một Lock Mutex duy nhất (`g_state_mutex`):
+Sự kiện nhấn phím từ Input Subsystem (`KEY_POWER`) được xử lý tập trung dưới một Mutex duy nhất (`g_state_mutex`):
 
 ```mermaid
 flowchart TD
-    A[Sự kiện Nút nhấn] --> B{Thời gian bấm}
+    A[Sự kiện Nút nhấn EV_KEY] --> B{Thời gian bấm}
     B -- "t >= 5000 ms (Nhấn giữ)" --> C[Ưu tiên 0: Chuyển chế độ Smart Config Soft AP <-> Station]
     B -- "50 ms <= t < 5000 ms (Nhấn ngắn)" --> D{Còi báo thức đang kêu?}
     D -- "Có (alarm_ringing == true)" --> E[Ưu tiên 1: Tắt chuông báo thức ngay lập tức]
@@ -140,7 +140,7 @@ flowchart TD
 
 ---
 
-## 6. Hướng dẫn Triển khai & Vận hành Chi tiết
+## 6. Hướng dẫn Triển khai & Vận hành v2.0
 
 ### 6.1 Ghi Hệ điều hành Yocto vào Thẻ nhớ MicroSD
 
@@ -176,11 +176,11 @@ sudo dd if=core-image-minimal-raspberrypi0-2w.rootfs.wic of=/dev/sdX bs=4M statu
      * Cáp TX $\rightarrow$ Chân 10 (GPIO 15 - RX của Pi)
      * Cáp RX $\rightarrow$ Chân 8 (GPIO 14 - TX của Pi)
      * Cáp GND $\rightarrow$ Chân 6 hoặc 9 (GND của Pi)
-   * Mở phần mềm kết nối serial (PuTTY / Minicom / Picocom) với cấu hình: Baud rate **115200**, Data bits 8, Stop bits 1, Parity None.
+   * Mở terminal serial với cấu hình: Baud rate **115200**, Data bits 8, Stop bits 1, Parity None.
    * Cắm nguồn vào cổng micro-USB (PWR IN). Đăng nhập bằng tài khoản: `root` (không cần mật khẩu).
 
 2. **Kích hoạt giao tiếp I2C-1:**
-   * Kiểm tra file cấu hình boot `/boot/config.txt` (hoặc phân vùng boot FAT32):
+   * Kiểm tra file `/boot/config.txt` xem đã có chỉ thị `dtparam=i2c_arm=on` chưa:
      ```bash
      cat /boot/config.txt | grep i2c_arm
      ```
@@ -188,7 +188,7 @@ sudo dd if=core-image-minimal-raspberrypi0-2w.rootfs.wic of=/dev/sdX bs=4M statu
      ```text
      dtparam=i2c_arm=on
      ```
-   * Sau khi khởi động lại, kiểm tra node thiết bị: `ls -l /dev/i2c-1` để chắc chắn bus I2C-1 đã sẵn sàng.
+   * Sau khi reboot, kiểm tra node thiết bị: `ls -l /dev/i2c-1` để bảo đảm bus I2C-1 đã sẵn sàng.
 
 3. **Kết nối mạng Wi-Fi & SSH:**
    * Máy chủ SSH **Dropbear** đã được tích hợp sẵn trong OS và tự khởi chạy trên cổng 22.
@@ -198,13 +198,13 @@ sudo dd if=core-image-minimal-raspberrypi0-2w.rootfs.wic of=/dev/sdX bs=4M statu
      wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf
      udhcpc -i wlan0
      ```
-   * Ghi nhận địa chỉ IP nhận được qua lệnh `ifconfig wlan0`. Giờ đây bạn có thể đăng nhập từ máy tính: `ssh root@<IP_CUA_PI>`.
+   * Ghi nhận địa chỉ IP nhận được qua lệnh `ifconfig wlan0`. Giờ đây bạn có thể đăng nhập qua mạng: `ssh root@<IP_CUA_PI>`.
 
 ---
 
 ### 6.3 Cài đặt Device Tree Overlay
 
-Device Tree Overlay cấu hình các chân GPIO 17 (Nút nhấn), GPIO 27 (Buzzer) và kích hoạt I2C-1 bus:
+Device Tree Overlay cấu hình chân GPIO 17 (Nút nhấn), GPIO 27 (Buzzer) và kích hoạt bus I2C-1:
 
 ```bash
 # 1. Sao chép file dtbo vào thư mục overlays của bootloader
@@ -213,7 +213,7 @@ cp devicetree/smartclock-overlay.dtbo /boot/overlays/
 # 2. Thêm chỉ thị nạp overlay vào /boot/config.txt để nạp tự động mỗi khi khởi động
 echo "dtoverlay=smartclock-overlay" >> /boot/config.txt
 
-# (Tùy chọn) Nạp overlay động ngay lập tức mà không cần khởi động lại:
+# (Tùy chọn) Nạp overlay động ngay lập tức mà không cần reboot:
 dtoverlay devicetree/smartclock-overlay.dtbo
 ```
 
@@ -221,61 +221,44 @@ dtoverlay devicetree/smartclock-overlay.dtbo
 
 ### 6.4 Biên dịch & Triển khai Ứng dụng (Deploy)
 
-* **Biên dịch trên máy Host (hoặc trực tiếp trên Pi Zero 2W):**
+* **Biên dịch trên máy tính phát triển:**
   ```bash
   cd src/
   make clean
-  make all      # Biên dịch cả Kernel Drivers (.ko) và Userspace Application (smartclock)
+  make all      # Biên dịch driver Input Subsystem, Buzzer và ứng dụng Userspace v2.0
   ```
 
-* **Triển khai từ máy Host sang Pi Zero 2W qua SCP:**
+* **Triển khai sang Pi Zero 2W qua SCP:**
   ```bash
-  # Từ máy tính phát triển, sao chép toàn bộ mã nguồn và nhị phân sang Pi
   scp -r ../SmartClock root@<IP_CUA_PI>:/home/root/
   ```
 
 ---
 
-### 6.5 Nạp Driver & Khởi chạy Ứng dụng
+### 6.5 Nạp Driver & Khởi chạy Ứng dụng v2.0
 
-Tùy theo phiên bản bạn muốn trải nghiệm, quy trình nạp driver như sau:
-
-#### Cho Phiên bản v1.0 (Character Device Driver)
-```bash
-# 1. Nạp 2 module driver character device
-insmod src/driver/btn_driver.ko       # Tạo node /dev/btn_driver
-insmod src/driver/buzzer_driver.ko    # Tạo node /dev/buzzer_driver
-
-# 2. Phân quyền truy cập các file thiết bị
-chmod 666 /dev/btn_driver /dev/buzzer_driver /dev/i2c-1
-
-# 3. Tạo thư mục cấu hình hệ thống
-mkdir -p /etc/smartclock /etc/wpa_supplicant /var/lib/misc
-
-# 4. Khởi chạy ứng dụng v1.0
-./src/app/smartclock
-```
-
-#### Cho Phiên bản v2.0 (Input Subsystem, Hardware Watchdog, MQTT-C)
 ```bash
 # 1. Nạp driver nút nhấn chuẩn Input Subsystem (tự động đăng ký /dev/input/event*)
 insmod src/driver/btn_driver.ko
 
-# 2. Nạp driver còi buzzer hrtimer PWM
+# 2. Nạp driver còi buzzer hrtimer PWM 2 kHz
 insmod src/driver/buzzer_driver.ko
 
-# 3. Phân quyền thiết bị
+# 3. Phân quyền truy cập các file thiết bị
 chmod 666 /dev/buzzer_driver /dev/i2c-1 /dev/input/event* /dev/watchdog*
 
-# 4. Kiểm tra sysfs telemetry của nút nhấn
+# 4. Kiểm tra Sysfs telemetry của nút nhấn
 cat /sys/devices/platform/smartclock_button/press_count
 cat /sys/devices/platform/smartclock_button/debounce_drops
 
-# 5. Khởi chạy ứng dụng v2.0
+# 5. Tạo thư mục cấu hình hệ thống
+mkdir -p /etc/smartclock /etc/wpa_supplicant /var/lib/misc
+
+# 6. Khởi chạy ứng dụng v2.0
 ./src/app/smartclock
 ```
 
-> **Ghi chú về Hardware Watchdog trên v2.0:** Khi ứng dụng khởi chạy, hệ thống sẽ tự động mở `/dev/watchdog` (chu kỳ 15s). Nếu muốn dừng ứng dụng mà không làm Pi khởi động lại, hãy bấm `Ctrl + C` để kích hoạt signal handler gửi ký tự `'V'` (Magic Close) tắt watchdog an toàn.
+> **Lưu ý về Hardware Watchdog:** Ứng dụng v2.0 tự động kích hoạt `/dev/watchdog` với chu kỳ 15 giây. Khi muốn dừng ứng dụng mà không làm Pi bị reset, hãy bấm `Ctrl + C` để kích hoạt signal handler gửi ký tự `'V'` (magic close) tắt watchdog an toàn.
 
 #### Cài đặt Tự khởi động cùng Hệ điều hành (Systemd Service)
 ```bash
@@ -288,21 +271,19 @@ systemctl start smartclock.service
 
 ---
 
-### 6.6 Hướng dẫn Sử dụng Thực tế (User Guide)
+### 6.6 Hướng dẫn Sử dụng Thực tế
 
 #### 1. Thao tác Phím Bấm Vật lý (GPIO 17)
-* **Chuyển đổi màn hình (Nhấn ngắn $< 5\text{s}$):** Luân phiên chuyển đổi giữa màn hình **ĐỒNG HỒ** (giờ, phút, giây, icon chuông, trạng thái kết nối) và màn hình **THỜI TIẾT** (nhiệt độ, độ ẩm, biểu tượng thời tiết thực tế từ Open-Meteo).
+* **Chuyển đổi màn hình (Nhấn ngắn $< 5\text{s}$):** Luân phiên chuyển đổi giữa màn hình **ĐỒNG HỒ** (giờ, phút, giây, icon chuông, Wi-Fi) và màn hình **THỜI TIẾT** (nhiệt độ, độ ẩm, biểu tượng mây/mưa/nắng từ Open-Meteo).
 * **Tắt còi báo thức (Nhấn ngắn khi chuông đang reo):** Tắt còi buzzer ngay lập tức mà không làm nhảy sai màn hình hiển thị.
 * **Cấu hình Wi-Fi SmartConfig (Nhấn giữ $\ge 5\text{s}$):** Chuyển Pi sang chế độ trạm phát sóng **Soft AP** (Tên mạng: `SmartClock-AP`, IP: `192.168.4.1`). Nhấn giữ 5s lần nữa để quay lại chế độ bắt sóng Station.
 
 #### 2. Cấu hình qua Trình duyệt Web (Port 8080)
 1. Kết nối điện thoại hoặc máy tính vào mạng Wi-Fi của SmartClock (hoặc cùng mạng LAN với Pi).
 2. Mở trình duyệt web truy cập: `http://<IP_CUA_PI>:8080` (hoặc `http://192.168.4.1:8080` khi ở chế độ Soft AP).
-3. Giao diện Web cho phép:
-   * Quét và nhập thông tin SSID / Mật khẩu Wi-Fi để đồng hồ kết nối internet.
-   * Đặt giờ báo thức (Giờ, Phút) và Bật/Tắt chuông. Cấu hình được ghi bền vững vào `/etc/smartclock/alarm.conf` bằng kỹ thuật Atomic Write chống mất dữ liệu khi cúp điện đột ngột.
+3. Giao diện Web cho phép cấu hình Wi-Fi và đặt giờ báo thức. Cấu hình được ghi bền vững vào `/etc/smartclock/alarm.conf` bằng kỹ thuật Atomic Write chống mất dữ liệu khi mất nguồn đột ngột.
 
-#### 3. Giám sát & Điều khiển từ xa qua MQTT (v2.0)
+#### 3. Giám sát & Điều khiển từ xa qua MQTT (HiveMQ)
 Ứng dụng kết nối tới public broker `broker.hivemq.com` (cổng 1883):
 * **Nhận dữ liệu Telemetry:** Lắng nghe topic `smartclock/tai/telemetry` để nhận JSON định kỳ mỗi 30 giây:
   ```json
