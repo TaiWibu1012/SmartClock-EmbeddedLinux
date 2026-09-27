@@ -4,8 +4,8 @@
 # ==============================================================================
 
 CC ?= $(CROSS_COMPILE)gcc
-CFLAGS ?= -Wall -Wextra -O2 -pipe -I../../include -I. -Imqtt
-LDFLAGS ?= -pthread -lrt -lm -lssl -lcrypto
+override CFLAGS += -Wall -Wextra -I../../include -I. -Imqtt
+override LDFLAGS += -pthread -lrt -lm -lssl -lcrypto
 
 # Target executable name
 TARGET = smartclock
