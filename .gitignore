@@ -18,6 +18,7 @@ smartclock_debug
 
 # Temporary files
 deploy_v2/
+releases/
 *.tmp
 *~
 .DS_Store
