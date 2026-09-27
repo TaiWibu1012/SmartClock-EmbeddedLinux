@@ -83,6 +83,15 @@ static int open_mqtt_socket(const char *addr, const char *port)
     return sockfd;
 }
 
+static const char *json_get_val(const char *json, const char *key)
+{
+    const char *p = strstr(json, key);
+    if (!p) return NULL;
+    p += strlen(key);
+    while (*p && (*p == ' ' || *p == ':' || *p == '\t' || *p == '\"')) p++;
+    return p;
+}
+
 /**
  * @brief Callback invoked when a message arrives on subscribed topics
  */
@@ -105,7 +114,42 @@ static void on_mqtt_message_received(void **unused, struct mqtt_response_publish
     printf("[mqtt] Received message on topic '%s': %s\n", topic, payload);
 
     /* Command Dispatcher */
-    if (strstr(payload, "SILENCE_ALARM") != NULL) {
+
+    /* 1. Toggle / Switch Screen Command */
+    if (strstr(payload, "toggle_screen") != NULL ||
+        strstr(payload, "SWITCH_SCREEN") != NULL ||
+        strstr(payload, "\"action\":\"toggle\"") != NULL ||
+        strstr(payload, "\"action\": \"toggle\"") != NULL ||
+        strstr(payload, "\"action\":\"screen\"") != NULL ||
+        strstr(payload, "\"action\": \"screen\"") != NULL) {
+
+        pthread_mutex_lock(&g_state_mutex);
+        if (strstr(payload, "WEATHER") != NULL || strstr(payload, "weather") != NULL) {
+            g_system_state.current_screen = SCREEN_WEATHER;
+            g_system_state.force_weather_fetch = true;
+            printf("[mqtt] Action: Screen explicitly set to WEATHER\n");
+        } else if (strstr(payload, "CLOCK") != NULL || strstr(payload, "clock") != NULL) {
+            g_system_state.current_screen = SCREEN_CLOCK;
+            printf("[mqtt] Action: Screen explicitly set to CLOCK\n");
+        } else {
+            /* Toggle between CLOCK and WEATHER */
+            g_system_state.current_screen = (g_system_state.current_screen == SCREEN_CLOCK) ? SCREEN_WEATHER : SCREEN_CLOCK;
+            if (g_system_state.current_screen == SCREEN_WEATHER) {
+                g_system_state.force_weather_fetch = true;
+            }
+            printf("[mqtt] Action: Screen toggled to %s\n",
+                   (g_system_state.current_screen == SCREEN_CLOCK) ? "CLOCK" : "WEATHER");
+        }
+        ssd1306_force_full_update();
+        pthread_cond_broadcast(&g_state_cond);
+        pthread_mutex_unlock(&g_state_mutex);
+        mqtt_trigger_publish();
+    }
+    /* 2. Silence Alarm Command */
+    else if (strstr(payload, "silence") != NULL ||
+             strstr(payload, "SILENCE") != NULL ||
+             strstr(payload, "SILENCE_ALARM") != NULL) {
+
         pthread_mutex_lock(&g_state_mutex);
         if (g_system_state.alarm_ringing) {
             g_system_state.alarm_ringing = false;
@@ -115,21 +159,26 @@ static void on_mqtt_message_received(void **unused, struct mqtt_response_publish
             alarm_manager_record_state(&tm_now, true);
             pthread_cond_broadcast(&g_state_cond);
             printf("[mqtt] Action: Alarm silenced remotely via MQTT command.\n");
+        } else {
+            printf("[mqtt] Action: Silence received but alarm is not ringing.\n");
         }
         pthread_mutex_unlock(&g_state_mutex);
         mqtt_trigger_publish();
     }
-    else if (strstr(payload, "SET_ALARM") != NULL) {
-        char *p_h = strstr(payload, "\"hour\":");
-        char *p_m = strstr(payload, "\"minute\":");
-        char *p_e = strstr(payload, "\"enabled\":");
+    /* 3. Set Alarm Command */
+    else if (strstr(payload, "set_alarm") != NULL ||
+             strstr(payload, "SET_ALARM") != NULL) {
+
+        const char *p_h = json_get_val(payload, "\"hour\"");
+        const char *p_m = json_get_val(payload, "\"minute\"");
+        const char *p_e = json_get_val(payload, "\"enabled\"");
 
         if (p_h && p_m) {
-            int h = atoi(p_h + 7);
-            int m = atoi(p_m + 9);
+            int h = atoi(p_h);
+            int m = atoi(p_m);
             bool en = true;
             if (p_e) {
-                en = (strstr(p_e + 10, "false") == NULL);
+                en = (strncmp(p_e, "false", 5) != 0);
             }
 
             if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
@@ -142,32 +191,29 @@ static void on_mqtt_message_received(void **unused, struct mqtt_response_publish
                 pthread_mutex_unlock(&g_state_mutex);
                 printf("[mqtt] Action: Alarm updated remotely to %02d:%02d (%s)\n",
                        h, m, en ? "ENABLED" : "DISABLED");
+            } else {
+                printf("[mqtt] Action: Invalid alarm time %02d:%02d\n", h, m);
             }
-        }
-        mqtt_trigger_publish();
-    }
-    else if (strstr(payload, "SWITCH_SCREEN") != NULL) {
-        pthread_mutex_lock(&g_state_mutex);
-        if (strstr(payload, "WEATHER") != NULL) {
-            g_system_state.current_screen = SCREEN_WEATHER;
-            g_system_state.force_weather_fetch = true;
-            printf("[mqtt] Action: Screen switched to WEATHER\n");
         } else {
-            g_system_state.current_screen = SCREEN_CLOCK;
-            printf("[mqtt] Action: Screen switched to CLOCK\n");
+            printf("[mqtt] Action: Missing hour or minute in set_alarm payload\n");
         }
-        ssd1306_force_full_update();
-        pthread_cond_broadcast(&g_state_cond);
-        pthread_mutex_unlock(&g_state_mutex);
         mqtt_trigger_publish();
     }
-    else if (strstr(payload, "FETCH_WEATHER") != NULL) {
+    /* 4. Fetch Weather Command */
+    else if (strstr(payload, "fetch_weather") != NULL ||
+             strstr(payload, "FETCH_WEATHER") != NULL) {
+
         pthread_mutex_lock(&g_state_mutex);
         g_system_state.force_weather_fetch = true;
+        pthread_cond_broadcast(&g_state_cond);
         pthread_mutex_unlock(&g_state_mutex);
         printf("[mqtt] Action: Immediate weather fetch triggered.\n");
     }
+    else {
+        printf("[mqtt] Warning: Unknown command payload: %s\n", payload);
+    }
 }
+
 
 /**
  * @brief Build and publish JSON system telemetry to MQTT broker

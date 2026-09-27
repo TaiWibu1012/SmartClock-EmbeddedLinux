@@ -103,6 +103,15 @@ static const char *wmo_code_to_condition(int code)
     }
 }
 
+static const char *json_find_val(const char *json_obj, const char *key)
+{
+    const char *p = strstr(json_obj, key);
+    if (!p) return NULL;
+    p += strlen(key);
+    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+    return p;
+}
+
 /**
  * @brief Parse JSON weather response to extract temperature, humidity, and condition
  * @param json_body String containing HTTP body payload
@@ -114,33 +123,39 @@ static bool parse_weather_json(const char *json_body, weather_data_t *out_data)
     if (!json_body || !out_data) return false;
 
     /* 1. Check for Open-Meteo API response structure */
-    const char *p_temp2m = strstr(json_body, "\"temperature_2m\":");
-    const char *p_hum = strstr(json_body, "\"relative_humidity_2m\":");
-    const char *p_wcode = strstr(json_body, "\"weather_code\":");
+    /* CRITICAL: Locate "current":{ object first, because "current_units" has the exact same key names! */
+    const char *p_current = strstr(json_body, "\"current\":");
+    if (!p_current) {
+        p_current = strstr(json_body, "\"current\" :");
+    }
 
-    if (p_temp2m && p_wcode) {
-        out_data->temperature = (float)atof(p_temp2m + 17);
-        if (p_hum) {
-            out_data->humidity = atoi(p_hum + 23);
-        } else {
-            out_data->humidity = 0;
+    if (p_current) {
+        const char *p_temp = json_find_val(p_current, "\"temperature_2m\"");
+        const char *p_hum  = json_find_val(p_current, "\"relative_humidity_2m\"");
+        const char *p_wcode = json_find_val(p_current, "\"weather_code\"");
+
+        if (p_temp && p_wcode) {
+            out_data->temperature = (float)atof(p_temp);
+            if (p_hum) {
+                out_data->humidity = atoi(p_hum);
+            } else {
+                out_data->humidity = 0;
+            }
+            int code = atoi(p_wcode);
+            strncpy(out_data->condition, wmo_code_to_condition(code), sizeof(out_data->condition) - 1);
+            out_data->condition[sizeof(out_data->condition) - 1] = '\0';
+            out_data->is_valid = true;
+            out_data->last_update_ts = (uint64_t)time(NULL);
+            return true;
         }
-        int code = atoi(p_wcode + 15);
-        strncpy(out_data->condition, wmo_code_to_condition(code), sizeof(out_data->condition) - 1);
-        out_data->condition[sizeof(out_data->condition) - 1] = '\0';
-        out_data->is_valid = true;
-        out_data->last_update_ts = (uint64_t)time(NULL);
-        return true;
     }
 
     /* 2. Fallback: Parse local mock server format */
-    const char *temp_pos = strstr(json_body, "\"temp\":");
+    const char *temp_pos = json_find_val(json_body, "\"temp\"");
     const char *cond_pos = strstr(json_body, "\"condition\":");
 
     if (!temp_pos || !cond_pos) return false;
 
-    temp_pos += strlen("\"temp\":");
-    while (*temp_pos == ' ' || *temp_pos == ':') temp_pos++;
     out_data->temperature = (float)atof(temp_pos);
 
     cond_pos += strlen("\"condition\":");
@@ -470,17 +485,19 @@ void render_weather_ui(const weather_data_t *data, net_mode_t net_mode)
 
         /* Large Temperature next to icon */
         snprintf(temp_str, sizeof(temp_str), "%.1f C", data->temperature);
-        ssd1306_draw_string(34, 16, temp_str, 2);
+        ssd1306_draw_string(30, 16, temp_str, 2);
 
-        /* Weather Condition string */
-        ssd1306_draw_string(34, 35, data->condition, 1);
+        /* Weather Condition string (limit to 13 chars to prevent overlapping humidity) */
+        char cond_display[16];
+        snprintf(cond_display, sizeof(cond_display), "%.13s", data->condition);
+        ssd1306_draw_string(6, 35, cond_display, 1);
 
-        /* Humidity with droplet icon if available */
+        /* Humidity with droplet icon if available (positioned safely at x=96) */
         if (data->humidity > 0) {
             char hum_str[16];
-            ssd1306_draw_bitmap(88, 35, g_icon_drop, 8, 8, 1);
+            ssd1306_draw_bitmap(96, 35, g_icon_drop, 8, 8, 1);
             snprintf(hum_str, sizeof(hum_str), "%d%%", data->humidity);
-            ssd1306_draw_string(98, 35, hum_str, 1);
+            ssd1306_draw_string(106, 35, hum_str, 1);
         }
     } else {
         ssd1306_draw_bitmap(8, 22, g_icon_wifi_none, 8, 8, 1);
@@ -494,14 +511,15 @@ void render_weather_ui(const weather_data_t *data, net_mode_t net_mode)
     ssd1306_draw_hline(0, 49, SSD1306_WIDTH, 1);
 
     if (strcmp(ip_str, "No IP") != 0) {
-        snprintf(footer_str, sizeof(footer_str), "IP: %s:%d", ip_str, DEFAULT_HTTP_PORT);
+        /* Format: "192.168.137.212:8080" (fits 128px screen, exactly 20 chars = 120px) */
+        snprintf(footer_str, sizeof(footer_str), "%s:%d", ip_str, DEFAULT_HTTP_PORT);
     } else {
-        snprintf(footer_str, sizeof(footer_str), "Status: Disconnected");
+        snprintf(footer_str, sizeof(footer_str), "Disconnected");
     }
 
     int footer_len = strlen(footer_str);
     int footer_x = (SSD1306_WIDTH - (footer_len * 6)) / 2;
-    if (footer_x < 1) footer_x = 1;
+    if (footer_x < 2) footer_x = 2;
 
     ssd1306_draw_string(footer_x, 53, footer_str, 1);
 
