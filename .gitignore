@@ -8,10 +8,12 @@
 .tmp_versions/
 
 # Application executables & Debug logs
-src/app/smartclock
-src/app/smartclock_debug
+**/smartclock
+**/smartclock_debug
+smartclock
+smartclock_debug
 *.log
-!docs/debug_logs/*.log
+!**/docs/debug_logs/*.log
 *.logog
 
 # Temporary files

@@ -1,0 +1,17 @@
+[Unit]
+Description=Smart Weather Alarm Clock Daemon (Project 2)
+After=network.target time-sync.target
+Wants=time-sync.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/smartclock
+Restart=always
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

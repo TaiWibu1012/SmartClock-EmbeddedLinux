@@ -1,0 +1,22 @@
+strace -f -e trace=timerfd_create,timerfd_settime,read,write,socket,connect,accept,poll -p 27560
+strace: Process 27560 attached with 7 threads
+
+[pid 27563] timerfd_create(CLOCK_MONOTONIC, 0) = 7
+[pid 27563] timerfd_settime(7, 0, {it_interval={tv_sec=1, tv_nsec=0}, it_value={tv_sec=1, tv_nsec=0}}, NULL) = 0
+[pid 27563] read(7, "\1\0\0\0\0\0\0\0", 8) = 8
+[pid 27563] read(7, "\1\0\0\0\0\0\0\0", 8) = 8
+[pid 27563] read(7, "\1\0\0\0\0\0\0\0", 8) = 8
+[pid 27566] poll([{fd=6, events=POLLIN}], 1, 500) = 0 (Timeout)
+[pid 27566] poll([{fd=6, events=POLLIN}], 1, 500) = 1 ([{fd=6, revents=POLLIN}])
+[pid 27566] accept(6, {sa_family=AF_INET, sin_port=htons(52314), sin_addr=inet_addr("192.168.4.2")}, [16]) = 8
+[pid 27566] read(8, "GET / HTTP/1.1\r\nHost: 192.168.4.1:8080\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n", 4095) = 81
+[pid 27566] write(8, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n", 63) = 63
+[pid 27566] write(8, "<!DOCTYPE html><html><head><title>SmartClock Setup</title>...", 724) = 724
+[pid 27566] close(8)                    = 0
+[pid 27565] socket(AF_INET, SOCK_STREAM|SOCK_NONBLOCK, IPPROTO_TCP) = 9
+[pid 27565] connect(9, {sa_family=AF_INET, sin_port=htons(8080), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress)
+[pid 27565] poll([{fd=9, events=POLLOUT}], 1, 5000) = 1 ([{fd=9, revents=POLLOUT}])
+[pid 27565] write(9, "GET /weather HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nConnection: close\r\n\r\n", 66) = 66
+[pid 27565] poll([{fd=9, events=POLLIN}], 1, 5000) = 1 ([{fd=9, revents=POLLIN}])
+[pid 27565] read(9, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"temp\":29.5,\"condition\":\"Partly Cloudy\"}", 4095) = 93
+[pid 27565] close(9)                    = 0

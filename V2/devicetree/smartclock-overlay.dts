@@ -1,0 +1,56 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2835";
+
+    /* Fragment 0: Pin Control configuration (Pull-Up for Button) */
+    fragment@0 {
+        target = <&gpio>;
+        __overlay__ {
+            button_pins: button_pins {
+                brcm,pins = <17>;     /* GPIO 17 */
+                brcm,function = <0>;  /* 0: Input */
+                brcm,pull = <2>;      /* 2: Internal Pull-Up */
+            };
+        };
+    };
+
+    /* Fragment 1: Declare Button and Buzzer GPIO nodes */
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+            smartclock_button: smartclock_button {
+                compatible = "devlinux,smartclock-button";
+                label = "SmartClock Push Button";
+                pinctrl-names = "default";
+                pinctrl-0 = <&button_pins>;
+                gpios = <&gpio 17 1>; /* Active Low */
+                status = "okay";
+            };
+
+            smartclock_buzzer: smartclock_buzzer {
+                compatible = "devlinux,smartclock-buzzer";
+                label = "SmartClock Active Buzzer";
+                gpios = <&gpio 27 0>; /* Active High */
+                status = "okay";
+            };
+        };
+    };
+
+    /* Fragment 2: Enable I2C-1 controller */
+    fragment@2 {
+        target = <&i2c1>;
+        __overlay__ {
+            #address-cells = <1>;
+            #size-cells = <0>;
+            status = "okay";
+
+            ssd1306_oled: oled@3c {
+                compatible = "solomon,ssd1306";
+                reg = <0x3c>;
+                status = "okay";
+            };
+        };
+    };
+};
