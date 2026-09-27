@@ -22,3 +22,7 @@ src/app/smartclock_debug
 # AI Agent rules & configurations (Local IDE only)
 .agent
 .agents
+
+# Decompressed disk images (>100MB)
+*.wic
+*.img
